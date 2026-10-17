@@ -1,6 +1,7 @@
-# Cosplay Developer Assistant
+# KMP Developer Assistant
 
-Консольный ассистент разработчика для [cosplay-2](https://github.com/Flobsterable/cosplay-2).
+Консольный ассистент разработчика для проектов Kotlin Multiplatform.
+Документация и правила конкретного приложения читаются из его отдельного репозитория.
 День 31: ответы по README/docs через RAG и текущая Git-ветка через настоящий MCP.
 Дополнительно: анализ закоммиченных diff и подготовка обновлений документации.
 
@@ -26,7 +27,7 @@ Kotlin Multiplatform / Compose / Ktor: diff, агентный RAG по доку�
 Нужны Git, Docker Engine и Docker Compose. Копия приложения хранится отдельно от ассистента.
 
 ```bash
-git clone --branch develop https://github.com/Flobsterable/cosplay-2.git /home/user/projects/cosplay-2
+git clone <URL_РЕПОЗИТОРИЯ_ПРИЛОЖЕНИЯ> /home/user/projects/my-kmp-app
 git clone https://github.com/Flobsterable/cosplay-dev-assistant.git
 cd cosplay-dev-assistant
 cp tools/dev-assistant/.env.example tools/dev-assistant/.env
@@ -59,7 +60,7 @@ chmod +x assistant
 ## Локальный запуск и проверки
 
 Нужен Node.js 22+; в Docker и CI используется Node.js 24. Для локального запуска задайте
-PROJECT_ROOT в .env абсолютным путём к приложению (в Windows можно использовать C:/Projects/cosplay-2).
+PROJECT_ROOT в .env абсолютным путём к приложению (в Windows можно использовать C:/Projects/my-kmp-app).
 
 ```bash
 cd tools/dev-assistant
@@ -77,12 +78,12 @@ npm start
 
 /sync BASE сравнивает BASE..HEAD целевого проекта, запускает change_agent → docs_sync_agent
 и показывает unified diff. Команда /sync BASE --apply сохраняет изменения, если docs чистые
-и репозиторий не изменился за время генерации. Запись ограничена шестью файлами из src/doc-paths.js.
+и репозиторий не изменился за время генерации. Запись ограничена существующими README.md и Markdown-файлами в docs/ целевого проекта.
 Docker по умолчанию монтирует приложение только для чтения; для явного сохранения:
 
 ```bash
 cd tools/dev-assistant
-sudo docker compose run --rm -v /home/user/projects/cosplay-2:/project assistant src/cli.js /sync HEAD~1 --apply
+sudo docker compose run --rm -v /home/user/projects/my-kmp-app:/project assistant src/cli.js /sync HEAD~1 --apply
 ```
 
 Шаблон examples/workflows/docs-sync.yml можно установить в .github/workflows/ целевого
@@ -102,8 +103,9 @@ Workflow сам клонирует этот репозиторий ассист�
 
 - tools/dev-assistant — код, Docker-конфигурация, MCP и тесты.
 - docs/assistant.md — подробное описание помощника.
-- examples/cosplay-2 — снимок документации приложения, подготовленной в этой работе.
 - examples/workflows/docs-sync.yml — шаблон автоматизации для репозитория приложения.
 - .github/workflows/test.yml — автоматические тесты ассистента без API-ключей.
 
-Документация приложения поддерживается в cosplay-2. Снимок в examples не обновляется автоматически.
+В profiles/base-review.md хранятся только общие правила KMP. Документация приложения,
+продуктовые контракты и docs/review-rules.md принадлежат целевому репозиторию.
+Копии документации приложения в репозитории агента не хранятся.

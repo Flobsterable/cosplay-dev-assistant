@@ -11,7 +11,7 @@ export async function connectProject(projectRoot) {
     args: [fileURLToPath(new URL('./mcp-server.js', import.meta.url)), projectRoot],
     env, stderr: 'inherit'
   });
-  const client = new Client({ name: 'cosplay-dev-assistant', version: '1.0.0' });
+  const client = new Client({ name: 'kmp-dev-assistant', version: '1.0.0' });
   try {
     await client.connect(transport);
   } catch (error) {

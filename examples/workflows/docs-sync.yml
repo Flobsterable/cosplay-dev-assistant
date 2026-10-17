@@ -62,12 +62,8 @@ jobs:
         with:
           branch: automation/docs-sync-${{ github.sha }}
           add-paths: |
-            docs/architecture.md
-            docs/festival-api.md
-            docs/development.md
-            docs/data-model.md
-            docs/feature-flows.md
-            docs/troubleshooting.md
+            README.md
+            docs/**/*.md
           commit-message: 'docs: update documentation from code changes'
           title: 'docs: align documentation with merged code'
           body: |

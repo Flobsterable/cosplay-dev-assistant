@@ -124,7 +124,7 @@ function escape(value) { return String(value).replaceAll('@', '@\u200b').replace
 export function renderReview(result, repository) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error('Некорректное имя репозитория.');
   const { review, context, sources, retrieval } = result;
-  const lines = ['<!-- cosplay-ai-review -->', reviewHeadMarker(context.head), `## AI-ревью · ${context.head.slice(0, 7)} · Kotlin Multiplatform / Compose / Ktor`, '', `Коммит: \`${context.head}\``, '', escape(review.summary), ''];
+  const lines = ['<!-- cosplay-ai-review -->', reviewHeadMarker(context.head), `## AI-ревью · ${context.head.slice(0, 7)} · Kotlin Multiplatform`, '', `Коммит: \`${context.head}\``, '', escape(review.summary), ''];
   if (result.layers) lines.push('### Два слоя ревью', '',
     '**Базовые правила агента:** ' + escape(result.layers.baseSummary || 'Нет анализируемых изменений.'), '',
     '**Правила проекта:** ' + escape(result.layers.projectSummary || 'Нет анализируемых изменений.'), '',

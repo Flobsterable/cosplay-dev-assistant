@@ -8,7 +8,7 @@ import { readProjectDiff } from './project-diff.js';
 
 const exec = promisify(execFile);
 const root = resolve(process.argv[2] || process.cwd());
-const server = new McpServer({ name: 'cosplay-project', version: '1.0.0' });
+const server = new McpServer({ name: 'project-context', version: '1.0.0' });
 const git = async (...args) => (await exec('git', ['-c', `safe.directory=${root}`, '-C', root, ...args], { timeout: 10000, maxBuffer: 1024 * 1024 })).stdout;
 const result = value => ({ content: [{ type: 'text', text: JSON.stringify(value) }] });
 const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };

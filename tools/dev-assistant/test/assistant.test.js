@@ -11,12 +11,13 @@ import { connectProject } from '../src/mcp-client.js';
 import { complete } from '../src/assistant.js';
 import { orchestrate as runOrchestrator, validatePlan } from '../src/orchestrator.js';
 import { collectDocumentation } from '../src/document-agent.js';
-import { syncDocs, validateUpdates, editableDocs } from '../src/sync-docs.js';
+import { syncDocs, validateUpdates } from '../src/sync-docs.js';
 import { readProjectDiff } from '../src/project-diff.js';
 
 const exec = promisify(execFile);
 const scratch = resolve(toolRoot, '.cache');
 const document = '# Архитектура\n\nМодуль data/festival получает фестивали из API.\n';
+const editableDocs = ['docs/architecture.md', 'docs/custom-guide.md'];
 async function fixture(t) {
   await mkdir(scratch, { recursive: true });
   const root = await mkdtemp(resolve(scratch, 'test-'));
@@ -261,18 +262,18 @@ test('documentation sync previews an applicable patch then saves only docs', asy
     const body = JSON.parse(init.body);
     if (body.messages[0].content.startsWith('Ты change_agent')) return reply('В Main.kt добавлено city.');
     assert.match(JSON.parse(body.messages[1].content).analysis, /city/);
-    return reply(JSON.stringify({ summary: 'Добавлено описание city', updates: [{ path: 'docs/architecture.md', content: updated }] }));
+    return reply(JSON.stringify({ summary: 'Добавлено описание city', updates: [{ path: 'docs/custom-guide.md', content: updated }] }));
   };
   const preview = await syncDocs(config, mcp, base, { fetchImpl: fake });
-  assert.equal(await readFile(resolve(root, 'docs/architecture.md'), 'utf8'), document);
+  assert.equal(await readFile(resolve(root, 'docs/custom-guide.md'), 'utf8'), document);
   assert.match(preview.patch, /\+Festival теперь/);
   await writeFile(resolve(root, 'proposal.patch'), preview.patch);
   await git('apply', '--check', 'proposal.patch');
   const codeBefore = await readFile(resolve(root, 'Main.kt'), 'utf8');
   await syncDocs(config, mcp, base, { apply: true, fetchImpl: fake });
-  assert.equal(await readFile(resolve(root, 'docs/architecture.md'), 'utf8'), updated);
+  assert.equal(await readFile(resolve(root, 'docs/custom-guide.md'), 'utf8'), updated);
   assert.equal(await readFile(resolve(root, 'Main.kt'), 'utf8'), codeBefore);
-  assert.match(await git('diff', '--name-only'), /^docs\/architecture.md$/);
+  assert.match(await git('diff', '--name-only'), /^docs\/custom-guide.md$/);
   const fresh = await buildIndex(root);
   assert.ok(search(fresh, 'city').length);
 });

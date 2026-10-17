@@ -3,7 +3,7 @@
 ## Что проверяется
 
 Базовый профиль `tools/dev-assistant/profiles/base-review.md` описывает проверки для
-стека cosplay-2: Kotlin Multiplatform, Android/Desktop, Compose/Material 3, Ktor,
+проектов Kotlin Multiplatform; Compose/Material 3, Ktor,
 корутины, сериализация, даты, Gradle и релизы. Версии берутся из Git-снимка приложения.
 
 Порядок приоритетов: баги и регрессии → архитектурные последствия → полезные рекомендации.
@@ -52,7 +52,7 @@
 В JSON каждого замечания есть rules с layer/base|project и реальными ID правил;
 Markdown показывает оба итога и происхождение каждого замечания.
 
-## Установка в cosplay-2
+## Установка в целевой проект
 
 Шаблон: `examples/workflows/ai-review.yml`. Скопируйте в `.github/workflows/ai-review.yml`
 приложения и замените `REPLACE_WITH_REVIEW_RUNTIME_SHA` на SHA коммита ассистента,
@@ -76,7 +76,7 @@ GITHUB_TOKEN выдаётся GitHub автоматически. Workflow исп
 
 ```bash
 cd tools/dev-assistant
-npm run review -- --base develop --head feature/example --repo Flobsterable/cosplay-2 --output /tmp/pr-review
+npm run review -- --base develop --head feature/example --repo OWNER/REPOSITORY --output /tmp/pr-review
 ```
 
 Получите review.md и review.json. Без --publish запросов на запись в GitHub нет.
