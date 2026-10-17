@@ -5,5 +5,6 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY src ./src
 COPY test ./test
+COPY profiles ./profiles
 ENTRYPOINT ["node"]
 CMD ["src/cli.js"]

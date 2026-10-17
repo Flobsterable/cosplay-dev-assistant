@@ -12,7 +12,8 @@
     "index": "node src/cli.js --index",
     "doctor": "node src/cli.js --doctor",
     "test": "node --test",
-    "mcp": "node src/mcp-server.js"
+    "mcp": "node src/mcp-server.js",
+    "review": "node src/review-cli.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",

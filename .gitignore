@@ -4,3 +4,4 @@
 !**/.env.example
 **/.cache/
 *.log
+**/review-output/
