@@ -112,7 +112,11 @@ ${context.projectRules?.text || 'отсутствуют'}
   for (const f of review.findings) if (!draft.findings.some(d => d.path === f.path && d.side === f.side && d.line === f.line)) throw new Error('Проверяющий добавил новое замечание вне черновиков.');
   // A changed location appears once; retain all verified explanations and rule IDs.
   review.findings = coalesceFindings(review.findings);
-  return { context, sources, retrieval: evidence.retrieval, layers: { ...layerInfo, baseSummary: baseReview.summary, projectSummary: projectReview.summary }, review };
+  // Report only verified outcomes; draft summaries may mention rejected findings.
+  const count = layer => review.findings.filter(f => f.rules.some(r => r.layer === layer)).length;
+  return { context, sources, retrieval: evidence.retrieval, layers: { ...layerInfo,
+    baseSummary: `Общие правила агента; итоговых замечаний в проверенном контексте: ${count('base')}.`,
+    projectSummary: context.projectRules ? `Действующие правила проекта; итоговых замечаний в проверенном контексте: ${count('project')}.` : projectReview.summary }, review };
 }
 
 function escape(value) { return String(value).replaceAll('@', '@\u200b').replaceAll('<', '&lt;').replaceAll('>', '&gt;'); }

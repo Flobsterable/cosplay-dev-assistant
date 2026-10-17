@@ -13,6 +13,9 @@ Material 3, Ktor, kotlinx.serialization, kotlinx.datetime, Gradle Kotlin DSL.
 Старую проблему можно упомянуть только как контекст новой регрессии.
 Вопросы стиля, субъективные переименования и общие пожелания не являются багами.
 Не требуй ViewModel, DI-фреймворк, Navigation или SQL-базу ради самого паттерна.
+Не создавай замечания вида «если отсутствующий в контексте код вдруг сделает X».
+Для риска утечки, гонки или ошибки покажи существующий путь выполнения и условия;
+если реализация недоступна, это ограничение проверки, а не подтверждённая проблема.
 
 ## B-COROUTINES — Kotlin и корутины
 
@@ -52,6 +55,11 @@ Material 3, Ktor, kotlinx.serialization, kotlinx.datetime, Gradle Kotlin DSL.
 - Изменённые публичные модели/контракты согласованы с вызывающим кодом, сериализацией и docs.
 - Android permissions, FileProvider/URI, установка APK и Desktop fallback сохраняют корректность.
 - Gradle, JVM/SDK и release workflow не ломают существующие targets и подпись релиза.
+- Для GitHub Actions учитывай встроенные гарантии: secrets, переданные через
+  secrets-контекст в env, автоматически маскируются в workflow-логах. Само env
+  не является утечкой и не требует дублирующего add-mask. Маскирование не защищает
+  артефакты или намеренно преобразованные значения: замечание требует конкретного
+  кода, который действительно пишет секрет в такой канал, а не предположения о CLI.
 
 ## B-TESTS — тесты и формат результата
 
@@ -68,3 +76,4 @@ Material 3, Ktor, kotlinx.serialization, kotlinx.datetime, Gradle Kotlin DSL.
 - https://developer.android.com/develop/ui/compose/side-effects
 - https://kotlinlang.org/docs/cancellation-and-timeouts.html
 - https://ktor.io/docs/client-response-validation.html
+- https://docs.github.com/en/actions/reference/security/secrets
