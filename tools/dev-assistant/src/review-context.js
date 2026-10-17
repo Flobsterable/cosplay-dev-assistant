@@ -53,7 +53,7 @@ export async function buildReviewContext(root, baseRef, headRef) {
   const diff = eligible.length ? await git('diff', '--no-ext-diff', '--no-textconv', '--no-renames', '--unified=5', base, head, '--', ...eligible.map(f => f.path)) : '';
   if (diff.length > 80000) throw new Error('Diff превышает 80 000 символов: разбейте PR. Проверка не выполнена.');
   const chunks = [], documents = [], omitted = files.filter(f => !reviewable(f.path)).map(f => ({ path: f.path, reason: 'неподдерживаемый или исключённый тип файла' }));
-  let total = 0;
+  let total = 0, projectRules = null;
   async function indexTree(ref, label, filter) {
     const entries = (await git('ls-tree', '-r', '-z', ref)).split('\0').filter(Boolean);
     for (const entry of entries) {
@@ -65,6 +65,7 @@ export async function buildReviewContext(root, baseRef, headRef) {
       const text = await git('cat-file', 'blob', blob);
       if (text.includes('\0')) { omitted.push({ path, reason: 'бинарное содержимое' }); continue; }
       total += bytes;
+      if (label === 'rules') projectRules = { path, ref, text };
       const catalogPath = `${label}:${path}`;
       documents.push(catalogPath);
       const lines = text.split(/\r?\n/);
@@ -76,7 +77,9 @@ export async function buildReviewContext(root, baseRef, headRef) {
       }
     }
   }
+  // Established project rules come from the target base tip, not from PR changes.
+  await indexTree(baseTip, 'rules', new Set(['docs/review-rules.md']));
   await indexTree(head, 'head');
   await indexTree(base, 'base', new Set(eligible.map(f => f.path)));
-  return { base, baseTip, head, files, diff, eligible, omitted, changedLines: changedLines(diff), index: { documents, chunks } };
+  return { base, baseTip, head, files, diff, eligible, omitted, projectRules, changedLines: changedLines(diff), index: { documents, chunks } };
 }
