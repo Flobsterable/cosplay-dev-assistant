@@ -53,7 +53,7 @@ async function main() {
       await ask((retrieve ? args.slice(1) : args).join(' '), retrieve);
       return;
     }
-    console.log('Cosplay 2 · оркестратор v1.2 (агент сам выбирает и читает README/docs)\n/help ваш вопрос — документация + Git-ветка через MCP\n/sync HEAD~1 — обновление документации по diff; --apply сохраняет изменения\n/exit — выход');
+    console.log('KMP Assistant · оркестратор v1.2 (агент сам выбирает и читает README/docs)\n/help ваш вопрос — документация + Git-ветка через MCP\n/sync HEAD~1 — обновление документации по diff; --apply сохраняет изменения\n/exit — выход');
     const rl = createInterface({ input: stdin, output: stdout });
     const stop = () => rl.close();
     rl.on('SIGINT', stop);

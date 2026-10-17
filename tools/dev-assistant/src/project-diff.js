@@ -1,7 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolve } from 'node:path';
-import { editableDocs } from './doc-paths.js';
 const exec = promisify(execFile);
 const paths = ['*.kt', '*.kts', '*.toml', 'gradle.properties', '.github/workflows/release.yml'];
 export async function readProjectDiff(root, base) {
@@ -14,6 +13,6 @@ export async function readProjectDiff(root, base) {
   const diff = await git('diff', '--no-ext-diff', '--no-textconv', '--unified=5', baseSha, headSha, '--', ...paths);
   if (diff.length > 60000) throw new Error('Diff превышает 60 000 символов. Выберите меньший диапазон коммитов.');
   const files = (await git('diff', '--name-only', baseSha, headSha, '--', ...paths)).trim().split('\n').filter(Boolean);
-  const dirtyDocs = (await git('status', '--porcelain', '--', ...editableDocs)).trim();
+  const dirtyDocs = (await git('status', '--porcelain', '--', 'README.md', 'docs/')).trim();
   return { base: baseSha, head: headSha, files, diff, dirtyDocs: Boolean(dirtyDocs) };
 }
