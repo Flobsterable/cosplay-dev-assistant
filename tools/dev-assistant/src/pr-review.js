@@ -54,14 +54,23 @@ ${context.diff}`;
 Верни JSON {"summary":"краткий итог","findings":[{"category":"bug|architecture|recommendation","priority":"P1|P2|P3","path":"путь без head:/base:","side":"RIGHT|LEFT","line":1,"title":"проблема","body":"сценарий, риск, исправление","sources":[1],"rules":[{"layer":"base|project","id":"ID из действующих правил"}]}]}.
 Замечания должны относиться к введённым/усугублённым PR проблемам, подтверждаться контекстом и привязываться к anchor изменённой строки. Не заполняй категории искусственно. Не утверждай, что тесты выполнены или PR одобрен.`;
   const input = { base: context.base, head: context.head, files: context.files, diff: context.diff, anchors, documentation, retrieval: evidence.retrieval, omitted: context.omitted };
+  async function reviewCall(messages) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try { return await complete(config, messages, fetchImpl, true, 7000); }
+      catch (error) {
+        if (attempt || !(error instanceof TypeError || error.name === 'TimeoutError' || /HTTP (429|5\d\d)/.test(error.message))) throw error;
+        onEvent({ agent: 'review_orchestrator', status: 'retry', detail: 'Повторяю вызов модели после временной сетевой/API ошибки' });
+      }
+    }
+  }
   async function runLayer(layer, rules) {
     onEvent({ agent: layer + '_reviewer', status: 'running', detail: layer === 'base' ? 'Общие правила агента' : 'Действующие правила проекта из base' });
-    const raw = await complete(config, [
+    const raw = await reviewCall([
       { role: 'system', content: policy + `
 Это независимый проход ${layer}. Проверяй только следующие правила; findings.rules должны содержать только layer=${layer}.
 ${rules}` },
       { role: 'user', content: JSON.stringify(input) }
-    ], fetchImpl, true, 7000);
+    ]);
     const result = validateReview(JSON.parse(raw), context, sources);
     if (result.findings.some(f => f.rules.some(r => r.layer !== layer))) throw new Error('Ревьюер использовал правила другого слоя.');
     onEvent({ agent: layer + '_reviewer', status: 'done', detail: `Замечаний: ${result.findings.length}` });
@@ -76,7 +85,7 @@ ${rules}` },
   const [baseReview, projectReview] = results.map(r => r.value);
   const draft = { summary: [baseReview.summary, projectReview.summary].join('\n'), findings: [...baseReview.findings, ...projectReview.findings] };
   onEvent({ agent: 'review_verifier', status: 'running', detail: 'Проверяю оба слоя и объединяю одинаковые проблемы' });
-  const verified = await complete(config, [
+  const verified = await reviewCall([
     { role: 'system', content: policy + `
 Базовые правила:
 ${profile}
@@ -84,7 +93,7 @@ ${profile}
 ${context.projectRules?.text || 'отсутствуют'}
 Проверь два независимых черновика. Удали ложные/старые/субъективные замечания. Объедини одинаковые проблемы и последствия одной причины, сохранив rules обоих слоёв. Если расхождение документации лишь следствие уже описанной ошибочной регрессии и устраняется исправлением этого бага, не создавай отдельное замечание и не предлагай документировать баг как правильное поведение. При этом не смешивай разные независимые проблемы лишь потому, что они на одной строке. Не добавляй новые проблемы.` },
     { role: 'user', content: JSON.stringify({ ...input, draft }) }
-  ], fetchImpl, true, 7000);
+  ]);
   const review = validateReview(JSON.parse(verified), context, sources);
   for (const f of review.findings) if (!draft.findings.some(d => d.path === f.path && d.side === f.side && d.line === f.line)) throw new Error('Проверяющий добавил новое замечание вне черновиков.');
   return { context, sources, retrieval: evidence.retrieval, layers: { ...layerInfo, baseSummary: baseReview.summary, projectSummary: projectReview.summary }, review };
