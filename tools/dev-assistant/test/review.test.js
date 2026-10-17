@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 import { buildReviewContext, changedLines, reviewable } from '../src/review-context.js';
-import { reviewPullRequest, validateReview, renderReview } from '../src/pr-review.js';
+import { reviewPullRequest, validateReview, renderReview, coalesceFindings } from '../src/pr-review.js';
 import { publishReview } from '../src/review-github.js';
 const exec = promisify(execFile);
 const reply = data => new Response(JSON.stringify(data), { status: 200 });
@@ -122,4 +122,11 @@ test('publication updates only the bot marker and skips a head that changed befo
     return reply({ state: 'open', head: { sha: calls === 3 ? 'b'.repeat(40) : head } });
   } });
   assert.equal(stale.published, false);
+});
+
+test('same changed location is reported once with all rule IDs and explanations preserved', () => {
+  const finding = { path: 'a.kt', side: 'RIGHT', line: 3, priority: 'P2', category: 'architecture', title: 'First', body: 'First consequence', sources: [1], rules: [{ layer: 'project', id: 'P-ONE' }] };
+  const merged = coalesceFindings([finding, { ...finding, category: 'bug', priority: 'P1', title: 'Root bug', body: 'Second consequence', sources: [2], rules: [{ layer: 'base', id: 'B-CORRECTNESS' }] }]);
+  assert.equal(merged.length, 1); assert.equal(merged[0].priority, 'P1'); assert.equal(merged[0].category, 'bug');
+  assert.equal(merged[0].rules.length, 2); assert.match(merged[0].body, /First consequence/); assert.match(merged[0].body, /Second consequence/);
 });

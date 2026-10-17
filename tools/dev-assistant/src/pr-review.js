@@ -6,6 +6,20 @@ import { buildReviewContext } from './review-context.js';
 export function ruleIds(text, prefix) { return new Set([...text.matchAll(/^##\s+([BP]-[A-Z0-9_-]+)\b/gm)].map(m => m[1]).filter(id => id.startsWith(prefix + '-'))); }
 
 const categories = ['bug', 'architecture', 'recommendation'];
+export function coalesceFindings(findings) {
+  const grouped = new Map();
+  for (const item of findings) {
+    const key = `${item.path}:${item.side}:${item.line}`;
+    if (!grouped.has(key)) { grouped.set(key, { ...item, sources: [...item.sources], rules: [...item.rules] }); continue; }
+    const current = grouped.get(key);
+    if (!current.body.includes(item.body)) current.body += '\n\n' + item.body;
+    current.sources = [...new Set([...current.sources, ...item.sources])];
+    current.rules = [...new Map([...current.rules, ...item.rules].map(r => [`${r.layer}:${r.id}`, r])).values()];
+    if (item.priority < current.priority) { current.priority = item.priority; current.title = item.title; }
+    if (categories.indexOf(item.category) < categories.indexOf(current.category)) current.category = item.category;
+  }
+  return [...grouped.values()];
+}
 export function validateReview(value, context, sources) {
   if (!value || typeof value.summary !== 'string' || value.summary.length > 3000 || !Array.isArray(value.findings) || value.findings.length > 15) throw new Error('Некорректная структура ревью.');
   const seen = new Set();
@@ -96,6 +110,8 @@ ${context.projectRules?.text || 'отсутствуют'}
   ]);
   const review = validateReview(JSON.parse(verified), context, sources);
   for (const f of review.findings) if (!draft.findings.some(d => d.path === f.path && d.side === f.side && d.line === f.line)) throw new Error('Проверяющий добавил новое замечание вне черновиков.');
+  // A changed location appears once; retain all verified explanations and rule IDs.
+  review.findings = coalesceFindings(review.findings);
   return { context, sources, retrieval: evidence.retrieval, layers: { ...layerInfo, baseSummary: baseReview.summary, projectSummary: projectReview.summary }, review };
 }
 
