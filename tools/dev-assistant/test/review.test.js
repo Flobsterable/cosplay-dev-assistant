@@ -110,7 +110,7 @@ test('publication updates only the bot marker and skips a head that changed befo
     requests.push({ url, init });
     if (url.includes('/pulls/')) return reply({ head: { sha: head }, state: 'open' });
     if (init.method === 'PATCH') return reply({ html_url: 'https://github.com/o/r/pull/1#issuecomment-7' });
-    return reply([{ id: 6, user: { login: 'human' }, body: '<!-- cosplay-ai-review --> spoof' }, { id: 7, user: { login: 'github-actions[bot]' }, body: '<!-- cosplay-ai-review --> old' }]);
+    return reply([{ id: 6, user: { login: 'human' }, body: '<!-- cosplay-ai-review --> spoof' }, { id: 7, user: { login: 'github-actions[bot]' }, body: `<!-- cosplay-ai-review -->\nКоммит: \`${head}\`\nold` }]);
   };
   const result = await publishReview({ repository: 'o/r', number: 1, head, body: '<!-- cosplay-ai-review --> new', token: 'fake', fetchImpl });
   assert.equal(result.published, true);
@@ -122,6 +122,33 @@ test('publication updates only the bot marker and skips a head that changed befo
     return reply({ state: 'open', head: { sha: calls === 3 ? 'b'.repeat(40) : head } });
   } });
   assert.equal(stale.published, false);
+});
+
+test('new commits keep previous reports; rerunning the same commit updates only its own report', async () => {
+  const shaA = 'a'.repeat(40), shaB = 'b'.repeat(40);
+  let current = shaA;
+  const comments = [], writes = [];
+  const fetchImpl = async (url, init) => {
+    if (url.includes('/pulls/')) return reply({ state: 'open', head: { sha: current } });
+    if (init.method === 'GET') return reply(comments);
+    const data = JSON.parse(init.body);
+    writes.push({ method: init.method, url });
+    if (init.method === 'POST') comments.push({ id: comments.length + 1, user: { login: 'github-actions[bot]' }, body: data.body });
+    else comments.find(c => url.endsWith('/' + c.id)).body = data.body;
+    return reply({ html_url: 'https://github.com/o/r/pull/1#comment' });
+  };
+  const publish = (head, text) => publishReview({ repository: 'o/r', number: 1, head, body: '<!-- cosplay-ai-review -->\n' + text, token: 'fake', fetchImpl });
+  await publish(shaA, 'Found a bug');
+  await publish(shaA, 'Found a bug; clarified');
+  const oldBody = comments[0].body;
+  current = shaB;
+  await publish(shaB, 'No findings after the fix');
+  await publish(shaB, 'No findings after the fix; repeated');
+  assert.deepEqual(writes.map(w => w.method), ['POST', 'PATCH', 'POST', 'PATCH']);
+  assert.equal(comments.length, 2);
+  assert.equal(comments[0].body, oldBody);
+  assert.ok(comments[0].body.includes(shaA)); assert.ok(comments[1].body.includes(shaB));
+  assert.match(comments[0].body, /Found a bug/); assert.match(comments[1].body, /No findings/);
 });
 
 test('same changed location is reported once with all rule IDs and explanations preserved', () => {
