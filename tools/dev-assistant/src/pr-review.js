@@ -70,9 +70,9 @@ ${context.diff}`;
   const input = { base: context.base, head: context.head, files: context.files, diff: context.diff, anchors, documentation, retrieval: evidence.retrieval, omitted: context.omitted };
   async function reviewCall(messages) {
     for (let attempt = 0; attempt < 2; attempt++) {
-      try { return await complete(config, messages, fetchImpl, true, 7000); }
+      try { return JSON.parse(await complete(config, messages, fetchImpl, true, 7000)); }
       catch (error) {
-        if (attempt || !(error instanceof TypeError || error.name === 'TimeoutError' || /HTTP (429|5\d\d)/.test(error.message))) throw error;
+        if (attempt || !(error instanceof SyntaxError || error instanceof TypeError || error.name === 'TimeoutError' || /HTTP (429|5\d\d)/.test(error.message))) throw error;
         onEvent({ agent: 'review_orchestrator', status: 'retry', detail: 'Повторяю вызов модели после временной сетевой/API ошибки' });
       }
     }
@@ -85,7 +85,7 @@ ${context.diff}`;
 ${rules}` },
       { role: 'user', content: JSON.stringify(input) }
     ]);
-    const result = validateReview(JSON.parse(raw), context, sources);
+    const result = validateReview(raw, context, sources);
     if (result.findings.some(f => f.rules.some(r => r.layer !== layer))) throw new Error('Ревьюер использовал правила другого слоя.');
     onEvent({ agent: layer + '_reviewer', status: 'done', detail: `Замечаний: ${result.findings.length}` });
     return result;
@@ -108,7 +108,7 @@ ${context.projectRules?.text || 'отсутствуют'}
 Проверь два независимых черновика. Удали ложные/старые/субъективные замечания. Объедини одинаковые проблемы и последствия одной причины, сохранив rules обоих слоёв. Если расхождение документации лишь следствие уже описанной ошибочной регрессии и устраняется исправлением этого бага, не создавай отдельное замечание и не предлагай документировать баг как правильное поведение. При этом не смешивай разные независимые проблемы лишь потому, что они на одной строке. Не добавляй новые проблемы.` },
     { role: 'user', content: JSON.stringify({ ...input, draft }) }
   ]);
-  const review = validateReview(JSON.parse(verified), context, sources);
+  const review = validateReview(verified, context, sources);
   for (const f of review.findings) if (!draft.findings.some(d => d.path === f.path && d.side === f.side && d.line === f.line)) throw new Error('Проверяющий добавил новое замечание вне черновиков.');
   // A changed location appears once; retain all verified explanations and rule IDs.
   review.findings = coalesceFindings(review.findings);

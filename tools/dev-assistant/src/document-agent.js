@@ -41,12 +41,19 @@ export async function collectIndexedContext(index, config, question, { fetchImpl
       ? `Ты независимый проверяющий полноту найденного контекста. Сопоставь вопрос, каталог ВСЕХ документов и прочитанные разделы. Запроси недостающие источники действием read/search; done разрешён, только если все существенные аспекты вопроса покрыты либо корпус не содержит ответа. ${actions}`
       : `Ты агент поиска по документации. Сам решай, какие документы читать и какие запросы выполнять, чтобы собрать полный контекст для ответа. ${actions}`;
     let decision;
-    try {
-      decision = JSON.parse(await complete(config, [
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        decision = JSON.parse(await complete(config, [
         { role: 'system', content: system },
-        { role: 'user', content: JSON.stringify({ question, catalog, gitContext, readSections: [...selected.values()], history, remainingSteps: maxSteps - step, remainingCharacters: maxCharacters - characters }) }
+        { role: 'user', content: JSON.stringify({ question, catalog, gitContext, readSections: [...selected.values()], history, remainingSteps: maxSteps - step, remainingCharacters: maxCharacters - characters,
+          ...(attempt ? { retry: 'Предыдущий ответ не удалось обработать. Верни ровно один JSON-объект действия без текста, блоков Markdown или второго объекта. reason — до 300 символов.' } : {}) }) }
       ], fetchImpl, true, 1800));
-    } catch (error) { throw new Error(`Не удалось выбрать действие поиска: ${error.message}`); }
+        break;
+      } catch (error) {
+        if (attempt || !(error instanceof SyntaxError || error instanceof TypeError || error.name === 'TimeoutError' || /HTTP (429|5\d\d)/.test(error.message))) throw new Error(`Не удалось выбрать действие поиска: ${error.message}`);
+        onEvent({ agent: 'retrieval_agent', status: 'retry', detail: 'Повторяю некорректный JSON или временно неудавшийся вызов модели' });
+      }
+    }
     if (!decision || !['read', 'search', 'done'].includes(decision.action)) throw new Error('Агент вернул неизвестное действие поиска.');
     onEvent({ agent: audited ? 'coverage_agent' : 'retrieval_agent', status: decision.action, detail: String(decision.reason || '').slice(0, 500) });
     if (decision.action === 'done') {
