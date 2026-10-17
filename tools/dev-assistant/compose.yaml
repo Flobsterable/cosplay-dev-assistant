@@ -1,0 +1,17 @@
+services:
+  assistant:
+    build:
+      context: .
+      network: host
+    init: true
+    stdin_open: true
+    tty: true
+    env_file: .env
+    environment:
+      PROJECT_ROOT: /project
+      ASSISTANT_CACHE_DIR: /cache
+    volumes:
+      - ${PROJECT_PATH:?Set PROJECT_PATH in tools/dev-assistant/.env to the application checkout}:/project:ro
+      - assistant-cache:/cache
+volumes:
+  assistant-cache:

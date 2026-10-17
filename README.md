@@ -1,2 +1,105 @@
-# cosplay-dev-assistant
-Console developer assistant: agent-directed README/docs retrieval, MCP Git context, DeepSeek orchestration and documentation sync.
+# Cosplay Developer Assistant
+
+Консольный ассистент разработчика для [cosplay-2](https://github.com/Flobsterable/cosplay-2).
+День 31: ответы по README/docs через RAG и текущая Git-ветка через настоящий MCP.
+Дополнительно: анализ закоммиченных diff и подготовка обновлений документации.
+
+## Как устроен поиск
+
+1. retrieval_agent видит каталог всех README/docs с заголовками и краткими началами разделов.
+2. Модель сама выбирает чтение документов целиком, отдельных разделов или BM25-поиск.
+3. После каждого действия модель получает результат и решает, нужно ли дочитать контекст.
+4. coverage_agent проверяет покрытие вопроса по каталогу и может запросить дополнительные источники.
+5. Оркестратор выбирает docs_agent/reviewer_agent, последовательное или параллельное выполнение и собирает ответ со ссылками.
+
+Специальных правил под конкретные вопросы нет. /help не читает исходники: только README.md
+и docs/**/*.md целевого проекта. MCP сообщает текущую ветку. /sync явно получает кодовый diff.
+Сабагенты — отдельные вызовы LLM с разными инструкциями, а не отдельные серверы.
+Сервис консольный; HTTP-сервер, веб-интерфейс, база данных и открытые порты не требуются.
+
+## Запуск на VPS
+
+Нужны Git, Docker Engine и Docker Compose. Копия приложения хранится отдельно от ассистента.
+
+```bash
+git clone --branch develop https://github.com/Flobsterable/cosplay-2.git /home/user/projects/cosplay-2
+git clone https://github.com/Flobsterable/cosplay-dev-assistant.git
+cd cosplay-dev-assistant
+cp tools/dev-assistant/.env.example tools/dev-assistant/.env
+```
+
+В tools/dev-assistant/.env задайте LLM_API_KEY и пути PROJECT_PATH/PROJECT_ROOT к копии приложения.
+LLM_BASE_URL и LLM_MODEL по умолчанию настроены на DeepSeek. Ключ хранится только локально.
+Для Docker PROJECT_PATH обязателен: это предотвращает случайное чтение документации самого ассистента.
+
+```bash
+cd tools/dev-assistant
+sudo docker compose build
+sudo docker compose run --rm -T assistant src/cli.js --doctor
+cd ../..
+chmod +x assistant
+./assistant
+```
+
+В приглашении ассистента:
+
+```text
+/help Как устроено приложение?
+/help Как добавить новый экран?
+/help Откуда поступают данные, если API недоступен?
+/help Какая текущая Git-ветка?
+/sync HEAD~1
+/exit
+```
+
+## Локальный запуск и проверки
+
+Нужен Node.js 22+; в Docker и CI используется Node.js 24. Для локального запуска задайте
+PROJECT_ROOT в .env абсолютным путём к приложению (в Windows можно использовать C:/Projects/cosplay-2).
+
+```bash
+cd tools/dev-assistant
+npm ci
+npm test
+npm run doctor
+npm start
+```
+
+Тесты используют настоящий MCP-сервер и тестовые ответы LLM; API-ключ и платные запросы не нужны.
+Проверяются агентное чтение без совпадения слов, дополнительные запросы проверки полноты,
+ограничение доступа к README/docs, честный статус при лимитах, оркестрация и безопасная синхронизация docs.
+
+## Обновление документации по diff
+
+/sync BASE сравнивает BASE..HEAD целевого проекта, запускает change_agent → docs_sync_agent
+и показывает unified diff. Команда /sync BASE --apply сохраняет изменения, если docs чистые
+и репозиторий не изменился за время генерации. Запись ограничена шестью файлами из src/doc-paths.js.
+Docker по умолчанию монтирует приложение только для чтения; для явного сохранения:
+
+```bash
+cd tools/dev-assistant
+sudo docker compose run --rm -v /home/user/projects/cosplay-2:/project assistant src/cli.js /sync HEAD~1 --apply
+```
+
+Шаблон examples/workflows/docs-sync.yml можно установить в .github/workflows/ целевого
+проекта. Он создаёт draft PR с обновлением документации после изменений Kotlin/Gradle.
+Настройте LLM_API_KEY в GitHub Secrets, LLM_MODEL и при необходимости LLM_BASE_URL в Variables.
+Workflow сам клонирует этот репозиторий ассистента; в приложение его исходники копировать не нужно.
+
+## Ограничения и актуальность
+
+На один вопрос: до 8 шагов чтения/поиска/проверки и до 100 000 символов выбранного контекста.
+При исчерпании лимита выводится статус незавершённой проверки. Проверка моделью снижает
+пропуски, но не гарантирует абсолютную полноту или правильность. Изменения docs следует просматривать.
+Новые Markdown-файлы в docs автоматически попадают в каталог. Чтобы получить свежую документацию,
+обновите копию целевого приложения через git pull; корпус перечитывается на каждом вопросе.
+
+## Состав репозитория
+
+- tools/dev-assistant — код, Docker-конфигурация, MCP и тесты.
+- docs/assistant.md — подробное описание помощника.
+- examples/cosplay-2 — снимок документации приложения, подготовленной в этой работе.
+- examples/workflows/docs-sync.yml — шаблон автоматизации для репозитория приложения.
+- .github/workflows/test.yml — автоматические тесты ассистента без API-ключей.
+
+Документация приложения поддерживается в cosplay-2. Снимок в examples не обновляется автоматически.

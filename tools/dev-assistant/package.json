@@ -1,0 +1,22 @@
+{
+  "name": "cosplay-dev-assistant",
+  "version": "1.2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/cli.js",
+    "ask": "node src/cli.js",
+    "index": "node src/cli.js --index",
+    "doctor": "node src/cli.js --doctor",
+    "test": "node --test",
+    "mcp": "node src/mcp-server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "diff": "^8.0.4",
+    "zod": "^4.6.7"
+  }
+}

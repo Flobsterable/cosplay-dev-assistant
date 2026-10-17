@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/tools/dev-assistant"
+exec sudo docker compose run --rm assistant src/cli.js "$@"

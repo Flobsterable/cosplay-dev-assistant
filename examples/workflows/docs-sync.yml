@@ -1,0 +1,76 @@
+name: Update documentation with AI
+
+on:
+  push:
+    branches: [develop, main]
+    paths:
+      - '**/*.kt'
+      - '**/*.kts'
+      - '**/*.toml'
+      - 'gradle.properties'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+    inputs:
+      base:
+        description: 'Base commit or ref for comparison with HEAD'
+        required: true
+        default: 'HEAD~1'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: docs-sync-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  docs-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: Flobsterable/cosplay-dev-assistant
+          path: .assistant-runtime
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: .assistant-runtime/tools/dev-assistant/package-lock.json
+      - run: npm ci
+        working-directory: .assistant-runtime/tools/dev-assistant
+      - name: Generate documentation changes
+        working-directory: .assistant-runtime/tools/dev-assistant
+        env:
+          PROJECT_ROOT: ${{ github.workspace }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+          BASE_REF: ${{ github.event.inputs.base || github.event.before }}
+        run: |
+          if [ "$BASE_REF" = "0000000000000000000000000000000000000000" ]; then
+            echo 'New branch has no previous commit; use workflow_dispatch with an explicit base.'
+            exit 0
+          fi
+          node src/cli.js /sync "$BASE_REF" --apply
+      - name: Open documentation PR
+        uses: peter-evans/create-pull-request@v8
+        with:
+          branch: automation/docs-sync-${{ github.sha }}
+          add-paths: |
+            docs/architecture.md
+            docs/festival-api.md
+            docs/development.md
+            docs/data-model.md
+            docs/feature-flows.md
+            docs/troubleshooting.md
+          commit-message: 'docs: update documentation from code changes'
+          title: 'docs: align documentation with merged code'
+          body: |
+            The documentation agent analysed committed Kotlin, Gradle and release workflow changes.
+            This PR updates only project documentation. Please check the diff against the merged code.
+          draft: true
