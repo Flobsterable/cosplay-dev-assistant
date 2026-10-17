@@ -2,7 +2,7 @@ import { mkdir, writeFile, appendFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { loadConfig } from './config.js';
 import { reviewPullRequest, renderReview } from './pr-review.js';
-import { publishReview } from './review-github.js';
+import { publishReview, publishInlineReview } from './review-github.js';
 
 async function main() {
   const flags = {};
@@ -28,6 +28,11 @@ async function main() {
   if (flags.publish) {
     const published = await publishReview({ repository: flags.repo, number: Number(flags.pr), head: result.context.head, body, token: process.env.GITHUB_TOKEN });
     console.log(published.published ? `Ревью опубликовано: ${published.url}` : published.reason);
+    if (published.published) {
+      const inline = await publishInlineReview({ repository: flags.repo, number: Number(flags.pr), head: result.context.head,
+        findings: result.review.findings, summaryUrl: published.url, token: process.env.GITHUB_TOKEN });
+      console.log(inline.published ? `Inline-замечания опубликованы: ${inline.comments} новых` : inline.reason);
+    }
   } else console.log(body);
 }
 main().catch(error => { console.error(`Ошибка AI-ревью: ${error.message}`); process.exitCode = 1; });
