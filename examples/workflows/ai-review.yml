@@ -1,0 +1,71 @@
+name: AI code review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+permissions:
+  contents: read
+  pull-requests: write
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  review:
+    if: ${{ !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout application base
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: project
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch PR head as data
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          case "$PR_NUMBER" in ''|*[!0-9]*) exit 1 ;; esac
+          git -C project fetch origin "+refs/pull/$PR_NUMBER/head:refs/remotes/origin/review-head"
+          test "$(git -C project rev-parse refs/remotes/origin/review-head)" = "$HEAD_SHA"
+      - name: Checkout trusted review runtime
+        uses: actions/checkout@v4
+        with:
+          repository: Flobsterable/cosplay-dev-assistant
+          ref: REPLACE_WITH_REVIEW_RUNTIME_SHA
+          path: assistant
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: assistant/tools/dev-assistant/package-lock.json
+      - name: Install trusted dependencies
+        run: npm ci --ignore-scripts
+        working-directory: assistant/tools/dev-assistant
+      - name: Review PR
+        env:
+          PROJECT_ROOT: ${{ github.workspace }}/project
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL || 'https://api.deepseek.com' }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'deepseek-flash' }}
+          GITHUB_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -z "$LLM_API_KEY" ]; then
+            echo '::error::Set LLM_API_KEY in repository Actions secrets. Review was not performed.'
+            exit 1
+          fi
+          node assistant/tools/dev-assistant/src/review-cli.js --base "$BASE_SHA" --head "$HEAD_SHA" --repo "$REPOSITORY" --pr "$PR_NUMBER" --publish --output "$RUNNER_TEMP/ai-review"
+      - name: Save review report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-review-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ai-review/
+          if-no-files-found: ignore
+          retention-days: 14

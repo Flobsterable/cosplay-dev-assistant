@@ -242,6 +242,18 @@ test('a no-answer decision still requires independent catalogue review', async t
   assert.equal(result.retrieval.status, 'checked');
 });
 
+test('malformed model JSON is retried once without executing partial actions', async t => {
+  const { config } = await fixture(t);
+  let calls = 0;
+  const result = await collectDocumentation(config, 'Произвольный вопрос', { fetchImpl: async () => {
+    if (++calls === 1) return reply('{"action":"read","paths":["README.md"]} {"action":"done"}');
+    return reply(JSON.stringify({ action: 'done', reason: 'Нет подтверждающих источников' }));
+  } });
+  assert.equal(calls, 3);
+  assert.equal(result.sources.length, 0);
+  assert.equal(result.retrieval.status, 'checked');
+});
+
 test('documentation sync previews an applicable patch then saves only docs', async t => {
   const { config, root, git, base, mcp } = await fixture(t);
   const updated = document + '\nFestival теперь содержит поле city.\n';
