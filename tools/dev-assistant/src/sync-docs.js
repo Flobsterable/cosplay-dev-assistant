@@ -5,6 +5,7 @@ import { complete, prepareQuestion } from './assistant.js';
 import { discoverEditableDocs } from './doc-paths.js';
 import { collectIndexedContext } from './document-agent.js';
 import { verifyDocumentation } from './docs-verifier.js';
+import { sourceIndexForDocs, changedSourceSections } from './docs-context.js';
 
 export function validateUpdates(value, editableDocs = []) {
   if (!value || typeof value.summary !== 'string' || !Array.isArray(value.updates) || value.updates.length > editableDocs.length) throw new Error('Некорректный ответ агента документации.');
@@ -41,10 +42,12 @@ export async function syncDocs(config, mcp, base, { apply = false, head = 'HEAD'
   const corpus = await mcp.syncContext(changes.base, changes.head);
   if (corpus.head !== changes.head) throw new Error('Git-контекст изменился во время чтения исходников. Повторите /sync.');
   evidence.context.tools.push('get_sync_context');
-  const context = await collectIndexedContext(corpus.index, config,
-    `Обнови документацию по diff. Найди определения изменённых API/компонентов, их места использования и связанные документы. Проверь фактическое поведение по полным исходникам.\n${changes.diff}`, {
+  const sourceIndex = sourceIndexForDocs(corpus.index);
+  const context = await collectIndexedContext(sourceIndex, config,
+    `Обнови документацию по diff. Текущие README/docs уже полностью переданы в gitContext.documents; повторно читать их через каталог не нужно. Изменённые участки кода предварительно прочитаны. Найди только недостающие определения изменённых API/компонентов и места использования. Проверь фактическое поведение по исходникам.\n${changes.diff}`, {
       fetchImpl, onEvent: event => emit(event.agent, event.status, event.detail),
-      maxCharacters: 60000, gitContext: { base: changes.base, head: changes.head }
+      maxCharacters: 60000, initialSectionIds: changedSourceSections(sourceIndex, changes.diff),
+      gitContext: { base: changes.base, head: changes.head, documents: originals }
     });
   const truncated = corpus.omitted.filter(file => /лимит/.test(file.reason));
   if (context.retrieval.status !== 'checked' || truncated.length) {
@@ -58,13 +61,25 @@ export async function syncDocs(config, mcp, base, { apply = false, head = 'HEAD'
   ], fetchImpl);
   emit('change_agent', 'done', 'Анализ передан docs_sync_agent');
   emit('docs_sync_agent', 'running', 'Подготовка новых версий затронутых Markdown-файлов');
-  const proposed = await complete(config, [
-    { role: 'system', content: `Ты docs_sync_agent. ${policy} Сверь отчёт с diff. Обновляй только факты, подтверждённые diff, сохраняя остальную документацию. Верни JSON {"summary":"что и почему изменено","updates":[{"path":"docs/architecture.md","content":"полный Markdown файла"}]}. Разрешены только ${editableDocs.join(', ')}. Не меняй код или настройки. Не создавай новые пути; выбирай только существующие документы из переданного списка. Если обновление не требуется, updates должен быть []. Не сокращай существующие разделы без причины. Верни полное содержимое каждого изменённого файла, не diff.` },
-    { role: 'user', content: JSON.stringify({ analysis, diff: changes.diff, sources: context.sources, documents: originals }) }
+  async function generate(documents) {
+    const paths = Object.keys(documents);
+    const proposed = await complete(config, [
+    { role: 'system', content: `Ты docs_sync_agent. ${policy} Сверь отчёт с diff. Обновляй только факты, подтверждённые diff, сохраняя остальную документацию. Верни JSON {"summary":"что и почему изменено","updates":[{"path":"docs/architecture.md","content":"полный Markdown файла"}]}. Разрешены только ${paths.join(', ')}. Не меняй код или настройки. Не создавай новые пути; выбирай только существующие документы из переданного списка. Если обновление не требуется, updates должен быть []. Не сокращай существующие разделы без причины. Верни полное содержимое каждого изменённого файла, не diff.` },
+    { role: 'user', content: JSON.stringify({ analysis, diff: changes.diff, sources: context.sources, documents, documentCatalog: editableDocs }) }
   ], fetchImpl, true, 8000);
+    return validateUpdates(JSON.parse(proposed), paths);
+  }
   let proposal;
-  try { proposal = validateUpdates(JSON.parse(proposed), editableDocs); }
-  catch (error) { throw new Error(`Предложение документации отклонено: ${error.message}`); }
+  try {
+    try { proposal = await generate(originals); }
+    catch (error) {
+      if (!/Ответ модели обрезан лимитом токенов/.test(error.message) || editableDocs.length < 2) throw error;
+      emit('docs_sync_agent', 'retry', 'Общий ответ обрезан: генерирую документы отдельно, запись только после полной проверки');
+      const parts = [];
+      for (const path of editableDocs) parts.push(await generate({ [path]: originals[path] }));
+      proposal = validateUpdates({ summary: parts.map(p => p.summary).join('\n'), updates: parts.flatMap(p => p.updates) }, editableDocs);
+    }
+  } catch (error) { throw new Error(`Предложение документации отклонено: ${error.message}`); }
   const updates = proposal.updates.map(update => ({ ...update, content: update.content.replace(/\r\n/g, '\n').trimEnd() + '\n' }))
     .filter(update => update.content !== originals[update.path].replace(/\r\n/g, '\n'));
   const patch = updates.map(update => createTwoFilesPatch(`a/${update.path}`, `b/${update.path}`, originals[update.path].replace(/\r\n/g, '\n'), update.content)).join('\n');
