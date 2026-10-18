@@ -51,7 +51,7 @@ export async function buildReviewContext(root, baseRef, headRef) {
   if (files.length > 100) throw new Error('PR содержит более 100 файлов: разбейте его на меньшие изменения.');
   const eligible = files.filter(f => reviewable(f.path));
   const diff = eligible.length ? await git('diff', '--no-ext-diff', '--no-textconv', '--no-renames', '--unified=5', base, head, '--', ...eligible.map(f => f.path)) : '';
-  if (diff.length > 80000) throw new Error('Diff превышает 80 000 символов: разбейте PR. Проверка не выполнена.');
+  if (diff.length > 100000) throw new Error('Diff превышает 100 000 символов: разбейте PR. Проверка не выполнена.');
   const chunks = [], documents = [], omitted = files.filter(f => !reviewable(f.path)).map(f => ({ path: f.path, reason: 'неподдерживаемый или исключённый тип файла' }));
   let total = 0, projectRules = null;
   async function indexTree(ref, label, filter) {
@@ -70,7 +70,7 @@ export async function buildReviewContext(root, baseRef, headRef) {
       documents.push(catalogPath);
       const lines = text.split(/\r?\n/);
       for (let start = 0; start < lines.length; start += 60) {
-        const end = Math.min(start + 70, lines.length), body = lines.slice(start, end).join('\n');
+        const end = Math.min(start + 60, lines.length), body = lines.slice(start, end).join('\n');
         if (!body.trim()) continue;
         const heading = lines.slice(start, end).filter(l => /^(?:#{1,6}\s|\s*(?:public |private |internal |suspend |data |sealed |@Composable)*\b(?:fun|class|interface|object)\b)/.test(l)).join(' ').slice(0, 300) || path;
         chunks.push({ path: catalogPath, sourcePath: path, revision: label, heading, startLine: start + 1, endLine: end, text: body, tokens: tokenize(path + ' ' + heading + ' ' + body) });

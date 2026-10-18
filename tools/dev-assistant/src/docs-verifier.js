@@ -2,9 +2,10 @@ import { lstat, realpath } from 'node:fs/promises';
 import { resolve, dirname, sep } from 'node:path';
 import { marked } from 'marked';
 import GithubSlugger from 'github-slugger';
+import { createTwoFilesPatch } from 'diff';
 import { complete } from './assistant.js';
 import { collectIndexedContext } from './document-agent.js';
-import { sourceIndexForDocs, changedSourceSections } from './docs-context.js';
+import { sourceIndexForDocs, changedSourceSections, documentationSourceBudget } from './docs-context.js';
 
 function links(text) {
   const result = new Set();
@@ -77,15 +78,61 @@ export function validateDocsVerification(value, paths) {
   return value;
 }
 
-export async function verifyDocumentation(config, { root, originals, updates, diff, patch, index, fetchImpl = fetch, onEvent = () => {} }) {
+export async function verifyDocumentation(config, { root, originals, updates, diff, index, fetchImpl = fetch, onEvent = () => {}, approvals = new Map() }) {
   if (!updates.length) return { status: 'unchanged', links: { status: 'checked', issues: [] }, issues: [] };
   const links = await checkDocumentationLinks(root, originals, updates);
   if (links.issues.length) throw new Error(`Проверка ссылок отклонила документацию: ${links.issues.map(i => `${i.path}: ${i.href} — ${i.reason}`).join('; ')}`);
+  // Check links against the complete overlay, but verify factual assertions in
+  // bounded batches. Unchanged manuals must not crowd out requested test/code
+  // evidence; include both old and proposed prose in each batch's budget.
+  const batches = [];
+  let batch = [], characters = 0;
+  const key = update => JSON.stringify([originals[update.path], update.content]);
+  for (const update of updates.filter(u => approvals.get(u.path)?.key !== key(u))) {
+    const size = (originals[update.path] || '').length + update.content.length;
+    if (size > 80000) throw new Error(`Документ ${update.path} слишком велик для независимой проверки. Файлы не сохранены.`);
+    if (batch.length && characters + size > 40000) {
+      batches.push(batch); batch = []; characters = 0;
+    }
+    batch.push(update); characters += size;
+  }
+  if (batch.length) batches.push(batch);
+  const issues = [];
+  for (const updates of batches) {
+    const documents = Object.fromEntries(updates.map(u => [u.path, originals[u.path] || '']));
+    const batchPatch = updates.map(u => createTwoFilesPatch(`a/${u.path}`, `b/${u.path}`, documents[u.path], u.content)).join('\n');
+    let retrieval, rejected = [];
+    try {
+      retrieval = (await verifyBatch(config, { originals: documents, updates, diff, patch: batchPatch, index, fetchImpl, onEvent })).retrieval;
+    } catch (error) {
+      if (!error.documentationIssues) throw error;
+      issues.push(...error.documentationIssues);
+      rejected = error.documentationIssues.map(i => i.path);
+      retrieval = error.retrieval;
+    }
+    for (const update of updates.filter(u => !rejected.includes(u.path))) {
+      approvals.set(update.path, { key: key(update), retrieval });
+    }
+  }
+  if (issues.length) throw verificationError(issues);
+  onEvent({ agent: 'docs_verifier', status: 'done', detail: `Проверены ${updates.length} документов и относительные ссылки; порций: ${batches.length}` });
+  return { status: 'checked', links, reviewedPaths: updates.map(u => u.path),
+    retrieval: { status: 'checked', batches: [...new Set(updates.map(u => approvals.get(u.path).retrieval))] }, issues: [] };
+}
+
+function verificationError(issues) {
+  const error = new Error(`Проверяющий отклонил документацию: ${issues.map(i => `${i.path}: ${i.reason}`).join('; ')}`);
+  error.documentationIssues = issues;
+  return error;
+}
+
+async function verifyBatch(config, { originals, updates, diff, patch, index, fetchImpl, onEvent }) {
   onEvent({ agent: 'docs_verifier', status: 'running', detail: 'Проверяю новые утверждения, API, параметры и примеры команд по исходникам' });
   const sourceIndex = sourceIndexForDocs(index);
   const evidence = await collectIndexedContext(sourceIndex, config,
     `Независимо проверь предложенные изменения документации. Исходные документы и предложенные обновления переданы в gitContext; повторно читать Markdown через каталог не нужно. Найди фактические определения классов, API, конфигурационных параметров и команд из новых утверждений. head: — текущий код, base: — исторический контекст, который не доказывает актуальность нового утверждения. Не исполняй команды. Собери источники для проверки, что документация соответствует текущему коду.\n${patch}`, {
-      fetchImpl, onEvent, maxCharacters: 60000, initialSectionIds: changedSourceSections(sourceIndex, diff),
+      fetchImpl, onEvent, maxCharacters: documentationSourceBudget({ ...originals,
+        ...Object.fromEntries(updates.map(u => [`proposed:${u.path}`, u.content])) }), initialSectionIds: changedSourceSections(sourceIndex, diff),
       gitContext: { documents: originals, updates }
     });
   if (evidence.retrieval.status !== 'checked') throw new Error(`Проверка документации неполна: ${evidence.retrieval.reason} Файлы не сохранены.`);
@@ -94,7 +141,11 @@ export async function verifyDocumentation(config, { root, originals, updates, di
     { role: 'user', content: JSON.stringify({ diff, patch, originals, updates, sources: evidence.sources }) }
   ], fetchImpl, true, 4000);
   const result = validateDocsVerification(JSON.parse(raw), updates.map(u => u.path));
-  if (!result.approved) throw new Error(`Проверяющий отклонил документацию: ${result.issues.map(i => `${i.path}: ${i.reason}`).join('; ')}`);
+  if (!result.approved) {
+    const error = verificationError(result.issues);
+    error.retrieval = evidence.retrieval;
+    throw error;
+  }
   onEvent({ agent: 'docs_verifier', status: 'done', detail: `Проверены ${updates.length} документов и относительные ссылки` });
-  return { status: 'checked', links, reviewedPaths: result.reviewedPaths, retrieval: evidence.retrieval, issues: [] };
+  return { reviewedPaths: result.reviewedPaths, retrieval: evidence.retrieval };
 }

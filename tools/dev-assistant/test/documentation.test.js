@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { checkDocumentationLinks, validateDocsVerification } from '../src/docs-verifier.js';
+import { checkDocumentationLinks, validateDocsVerification, verifyDocumentation } from '../src/docs-verifier.js';
 import { auditDocumentation, validateDocsAudit } from '../src/docs-audit.js';
 import { buildReviewContext } from '../src/review-context.js';
 import { syncDocs } from '../src/sync-docs.js';
@@ -13,8 +13,17 @@ import { connectProject } from '../src/mcp-client.js';
 import { renderReview } from '../src/pr-review.js';
 import { collectIndexedContext } from '../src/document-agent.js';
 import { createServer } from 'node:http';
+import { documentationSourceBudget } from '../src/docs-context.js';
 
 const exec = promisify(execFile);
+test('docs sync lends unused document capacity to source retrieval within the combined ceiling', () => {
+  for (const size of [0, 40000, 67000, 80000]) {
+    const budget = documentationSourceBudget({ 'docs/guide.md': 'x'.repeat(size) });
+    assert.ok(budget >= 60000 && budget <= 100000);
+    assert.ok(budget + size <= 140000);
+  }
+  assert.equal(documentationSourceBudget({ guide: 'x'.repeat(67000) }), 73000);
+});
 const response = value => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(value) } }] }));
 async function fixture(t, documented = false) {
   const root = await mkdtemp(resolve(tmpdir(), 'docs-validation-'));
@@ -51,6 +60,9 @@ test('PR audit flags an undocumented public parameter, verifies it and renders a
     const retrieved = retrieval(system, payload); if (retrieved) return retrieved;
     const code = payload.sources.find(s => s.path === 'head:Client.kt');
     const doc = payload.sources.find(s => s.path === 'head:docs/config.md');
+    assert.ok(payload.sources.every(s => !Object.hasOwn(s, 'sectionId')));
+    assert.ok(payload.anchors.find(a => a.path === 'Client.kt').sourceIds.includes(code.id));
+    assert.ok(payload.documentSources.find(d => d.document === 'docs/config.md').sourceIds.includes(doc.id));
     assert.match(code.text, /timeoutMs/); assert.match(doc.text, /default timeout/);
     if (payload.draft) verified = true;
     return response({ summary: 'Новый параметр не описан.', findings: [{ path: 'Client.kt', side: 'RIGHT', line: 1,
@@ -71,6 +83,21 @@ test('PR audit sees documentation updated in the same PR even when retrieval did
     return response({ summary: 'Документация уже обновлена автором.', findings: [] });
   } });
   assert.equal(audit.status, 'checked'); assert.deepEqual(audit.findings, []);
+});
+
+test('audit repairs malformed JSON structure while retaining a confirmed documentation finding', async t => {
+  const { config, context } = await fixture(t);
+  let calls = 0;
+  const audit = await auditDocumentation(config, context, { fetchImpl: async (_url, init) => {
+    const { messages } = JSON.parse(init.body), system = messages[0].content, payload = JSON.parse(messages[1].content);
+    const found = retrieval(system, payload); if (found) return found;
+    if (++calls === 1) return response({ summary: 123, findings: {} });
+    const code = payload.sources.find(s => s.path === 'head:Client.kt');
+    const doc = payload.sources.find(s => s.path === 'head:docs/config.md');
+    return response({ summary: 'Timeout missing in docs.', findings: [{ path: 'Client.kt', side: 'RIGHT', line: 1,
+      document: 'docs/config.md', title: 'Document timeout', body: 'timeoutMs defaults to 5000.', sources: [code.id, doc.id] }] });
+  } });
+  assert.equal(calls, 3); assert.equal(audit.status, 'checked'); assert.equal(audit.findings.length, 1);
 });
 
 test('audit does not report a clean result when source retrieval is incomplete', async t => {
@@ -120,6 +147,31 @@ test('incomplete retrieval names deferred sections and distinguishes character a
   assert.match(report, /head:Large.kt:1-70/);
   assert.match(report, /2\/8/); assert.match(report, /0\/5/);
   assert.doesNotMatch(report, /Статус аудита: limit|Подтверждённых расхождений документации не найдено/);
+});
+
+test('audit seeds current production and deleted definitions without exhausting budget on history and tests', async () => {
+  const chunk = (revision, sourcePath, size) => ({ path: `${revision}:${sourcePath}`, sourcePath, revision,
+    startLine: 1, endLine: 70, heading: sourcePath, text: 'x'.repeat(size) });
+  const chunks = [chunk('head', 'docs/guide.md', 70000), chunk('head', 'Client.kt', 35000),
+    chunk('base', 'Client.kt', 35000), chunk('head', 'app/src/desktopTest/ClientTest.kt', 65000),
+    chunk('base', 'Deleted.kt', 5000)];
+  const changedLines = new Map(['Client.kt', 'app/src/desktopTest/ClientTest.kt', 'Deleted.kt']
+    .map(path => [path, { LEFT: new Set([1]), RIGHT: new Set([1]) }]));
+  const context = { diff: 'production API changed; old API deleted; tests expanded', omitted: [], changedLines,
+    index: { chunks, documents: chunks.map(s => s.path) } };
+  const config = { apiKey: 'test', model: 'test', baseUrl: 'https://example.invalid' };
+  const result = await auditDocumentation(config, context, { fetchImpl: async (_url, init) => {
+    const { messages } = JSON.parse(init.body), payload = JSON.parse(messages[1].content);
+    if (/^Ты агент поиска|^Ты независимый проверяющий/.test(messages[0].content)) {
+      assert.deepEqual(payload.readSections.map(s => s.path), ['head:docs/guide.md', 'head:Client.kt', 'base:Deleted.kt']);
+      assert.ok(payload.catalog.some(s => s.path === 'base:Client.kt'));
+      assert.ok(payload.catalog.some(s => s.path.includes('desktopTest')));
+      return response({ action: 'done' });
+    }
+    return response({ summary: 'Public API covered.', findings: [] });
+  } });
+  assert.equal(result.status, 'checked');
+  assert.equal(result.retrieval.characters, 110000);
 });
 
 test('re-reading preloaded sections switches to independent coverage without marking them checked automatically', async () => {
@@ -186,7 +238,10 @@ test('post-merge sync keeps large docs outside the code budget for generation an
     if (/^Ты агент поиска|^Ты независимый проверяющий/.test(system)) {
       assert.ok(payload.catalog.every(d => !d.path.endsWith('.md')));
       assert.ok(payload.readSections.some(s => s.sourcePath === 'Client.kt' && s.text.includes('timeoutMs')));
-      assert.ok(Object.values(payload.gitContext.documents).join('').length > 60000);
+      if (payload.gitContext.updates) {
+        assert.deepEqual(Object.keys(payload.gitContext.documents), ['docs/config.md']);
+        assert.ok(payload.remainingCharacters > 99000);
+      } else assert.ok(Object.values(payload.gitContext.documents).join('').length > 60000);
       if (/^Ты независимый/.test(system)) coveragePasses++;
       return response({ action: 'done' });
     }
@@ -224,6 +279,51 @@ test('truncated multi-document generation falls back to single files and verifie
   assert.equal(await readFile(resolve(root, 'docs/config.md'), 'utf8'), updated);
 });
 
+for (const alwaysReject of [false, true]) {
+  test(`sync sends verifier feedback to the author and ${alwaysReject ? 'stops after bounded repairs' : 'checks the correction before saving'}`, async t => {
+    const { root, config, base, readme } = await fixture(t);
+    const original = await readFile(resolve(root, 'docs/config.md'), 'utf8');
+    const mcp = await connectProject(root); t.after(() => mcp.close());
+    let reviews = 0, repairs = 0;
+    const corrected = '# Configuration\n\nClient.timeoutMs defaults to 5000 ms.\n';
+    const promise = syncDocs(config, mcp, base, { apply: true, fetchImpl: async (_url, init) => {
+      const { messages } = JSON.parse(init.body), system = messages[0].content, payload = JSON.parse(messages[1].content);
+      const found = retrieval(system, payload); if (found) return found;
+      assert.equal(await readFile(resolve(root, 'docs/config.md'), 'utf8'), original);
+      assert.equal(await readFile(resolve(root, 'README.md'), 'utf8'), readme);
+      if (system.startsWith('Ты change_agent')) return new Response(JSON.stringify({ choices: [{ message: { content: 'Timeout added.' } }] }));
+      if (system.startsWith('Ты docs_sync_agent')) {
+        if (payload.repair) {
+          repairs++;
+          assert.deepEqual(Object.keys(payload.documents), ['docs/config.md']);
+          assert.match(payload.repair.issues[0].reason, /Wrong timeout/);
+          assert.equal(payload.repair.previousUpdates[0].path, 'docs/config.md');
+          return response({ summary: 'Correct the parameter default.', updates: [{ path: 'docs/config.md', content: corrected }] });
+        }
+        return response({ summary: 'Describe timeout.', updates: [
+          { path: 'README.md', content: readme + '\nThe timeout can be configured.\n' },
+          { path: 'docs/config.md', content: '# Configuration\n\nClient.timeoutMs defaults to 9000 ms.\n' }
+        ] });
+      }
+      reviews++;
+      const reject = alwaysReject || reviews === 1;
+      return response({ approved: !reject, reviewedPaths: payload.updates.map(u => u.path),
+        issues: reject ? [{ path: 'docs/config.md', reason: 'Wrong timeout: the code default is 5000.' }] : [] });
+    } });
+    if (alwaysReject) {
+      await assert.rejects(promise, /Wrong timeout/);
+      assert.equal(reviews, 3); assert.equal(repairs, 2);
+      assert.equal(await readFile(resolve(root, 'docs/config.md'), 'utf8'), original);
+      assert.equal(await readFile(resolve(root, 'README.md'), 'utf8'), readme);
+    } else {
+      assert.equal((await promise).verification.status, 'checked');
+      assert.equal(reviews, 2); assert.equal(repairs, 1);
+      assert.equal(await readFile(resolve(root, 'docs/config.md'), 'utf8'), corrected);
+      assert.match(await readFile(resolve(root, 'README.md'), 'utf8'), /timeout can be configured/);
+    }
+  });
+}
+
 test('link checks parse reference links and images, ignore code examples and tolerate old broken links', async t => {
   const { root, readme } = await fixture(t);
   const originals = { 'README.md': readme + '\n[Old](old-missing.md)\n' };
@@ -238,6 +338,72 @@ test('documentation verifier requires an explicit verdict for every changed docu
   assert.throws(() => validateDocsVerification({ approved: true, reviewedPaths: [], issues: [] }, ['README.md']));
   assert.throws(() => validateDocsVerification({ approved: true, reviewedPaths: ['README.md'], issues: [{ path: 'README.md', reason: 'Missing class' }] }, ['README.md']));
   assert.throws(() => validateDocsVerification({ approved: false, reviewedPaths: ['README.md'], issues: [] }, ['README.md']));
+});
+
+for (const rejectLast of [false, true]) {
+  test(`verification batches leave room for requested test evidence and ${rejectLast ? 'reject the last batch' : 'check every document'}`, async t => {
+    const { root, config, context } = await fixture(t);
+    const originals = { 'docs/untouched.md': '# Existing\n' + 'x'.repeat(49000) };
+    const updates = ['README.md', 'docs/config.md', 'docs/guide.md'].map(path => {
+      originals[path] = '# Before\n' + 'a'.repeat(6000);
+      return { path, content: '# After\n' + 'b'.repeat(9000) };
+    });
+    const template = context.index.chunks.find(s => s.path === 'head:Client.kt');
+    const index = { documents: ['head:Client.kt', 'head:src/desktopTest/Proof.kt'], chunks: [
+      { ...template, text: 'class Client\n' + ' '.repeat(65000) },
+      { ...template, path: 'head:src/desktopTest/Proof.kt', sourcePath: 'src/desktopTest/Proof.kt', text: 'class Proof\n' + ' '.repeat(15000) }
+    ] };
+    const reviewed = [];
+    const promise = verifyDocumentation(config, { root, originals, updates,
+      diff: 'diff --git a/Client.kt b/Client.kt\n--- a/Client.kt\n+++ b/Client.kt\n@@ -1 +1 @@\n-class Old\n+class Client\n', index,
+      fetchImpl: async (_url, init) => {
+        const { messages } = JSON.parse(init.body), system = messages[0].content, payload = JSON.parse(messages[1].content);
+        if (/^Ты агент поиска|^Ты независимый проверяющий/.test(system)) {
+          assert.ok(!Object.hasOwn(payload.gitContext.documents, 'docs/untouched.md'));
+          const proseSize = Object.values(payload.gitContext.documents).join('').length + payload.gitContext.updates.map(u => u.content).join('').length;
+          assert.ok(proseSize + payload.remainingCharacters + payload.readSections.reduce((n, s) => n + s.text.length, 0) <= 140000);
+          return response(payload.readSections.some(s => s.sourcePath.endsWith('Proof.kt')) ? { action: 'done' } : { action: 'read', paths: ['head:src/desktopTest/Proof.kt'] });
+        }
+        assert.ok(payload.sources.some(s => s.sourcePath.endsWith('Proof.kt')));
+        const paths = payload.updates.map(u => u.path); reviewed.push(...paths);
+        const rejected = rejectLast && paths.includes('docs/guide.md');
+        return response({ approved: !rejected, reviewedPaths: paths, issues: rejected ? [{ path: 'docs/guide.md', reason: 'Unconfirmed assertion' }] : [] });
+      } });
+    if (rejectLast) await assert.rejects(promise, /Unconfirmed assertion/);
+    else {
+      const result = await promise;
+      assert.equal(result.retrieval.batches.length, 2);
+      assert.ok(result.retrieval.batches.every(r => r.status === 'checked' && r.characters > 80000));
+    }
+    assert.deepEqual(reviewed, updates.map(u => u.path));
+  });
+}
+
+test('verification collects every batch issue and rechecks only changed or rejected prose', async t => {
+  const { root, config, context } = await fixture(t);
+  const originals = Object.fromEntries(['README.md', 'docs/config.md', 'docs/guide.md'].map(p => [p, '# Before\n' + 'a'.repeat(6000)]));
+  const updates = Object.keys(originals).map(path => ({ path, content: '# After\n' + 'b'.repeat(9000) }));
+  const approvals = new Map(), reviewed = [];
+  let repairing = false;
+  const verify = () => verifyDocumentation(config, { root, originals, updates, diff: context.diff, index: context.index, approvals,
+    fetchImpl: async (_url, init) => {
+      const { messages } = JSON.parse(init.body), system = messages[0].content, payload = JSON.parse(messages[1].content);
+      const found = retrieval(system, payload); if (found) return found;
+      const paths = payload.updates.map(u => u.path); reviewed.push(paths);
+      const issues = repairing ? [] : paths.filter(p => p !== 'README.md').map(path => ({ path, reason: 'Needs correction' }));
+      return response({ approved: !issues.length, reviewedPaths: paths, issues });
+    } });
+  await assert.rejects(verify(), error => {
+    assert.deepEqual(error.documentationIssues.map(i => i.path), ['docs/config.md', 'docs/guide.md']); return true;
+  });
+  assert.equal(reviewed.length, 2);
+  repairing = true;
+  await verify();
+  assert.deepEqual(reviewed[2], ['docs/config.md', 'docs/guide.md']);
+  // A previous approval cannot cover a subsequent change to that document.
+  updates[0].content += '\nChanged again.\n';
+  await verify();
+  assert.deepEqual(reviewed[3], ['README.md']);
 });
 
 test('links validate heading anchors against proposed docs and catch breakage in untouched documents', async t => {
