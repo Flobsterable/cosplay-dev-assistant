@@ -80,8 +80,10 @@ test('review selects code/docs through the agent, verifies the draft and formats
   let reviewers = 0;
   const fetchImpl = async (_url, init) => {
     const body = JSON.parse(init.body), payload = JSON.parse(body.messages[1].content);
-    if (/^Ты агент поиска|^Ты независимый проверяющий/.test(body.messages[0].content)) return modelReply(payload.readSections.length
-      ? { action: 'done' } : { action: 'read', paths: ['head:LoadingBlock.kt', 'head:Caller.kt', 'head:docs/contracts.md'] });
+    if (/^Ты агент поиска|^Ты независимый проверяющий/.test(body.messages[0].content)) {
+      const missing = ['head:LoadingBlock.kt', 'head:Caller.kt', 'head:docs/contracts.md'].filter(path => !payload.readSections.some(s => s.path === path));
+      return modelReply(missing.length ? { action: 'read', paths: missing } : { action: 'done' });
+    }
     if (body.messages[0].content.startsWith('Ты docs_auditor')) {
       assert.equal(payload.codeFindings.length, 1);
       return modelReply({ summary: 'Регрессия уже описана в ревью кода; docs не меняем.', findings: [] });

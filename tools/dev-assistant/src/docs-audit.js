@@ -1,5 +1,6 @@
 import { complete } from './assistant.js';
 import { collectIndexedContext } from './document-agent.js';
+import { changedProductionSections } from './docs-context.js';
 
 const isDocument = source => source.revision === 'head' &&
   (source.sourcePath === 'README.md' || /^docs\/.*\.md$/i.test(source.sourcePath));
@@ -39,13 +40,10 @@ export async function auditDocumentation(config, context, { codeFindings = [], f
   // Use the existing combined ceiling (60k retrieval + 80k docs) once, without
   // reading the same documents in two independent budgets. Seed changed code and
   // all head docs before asking the model to look for additional dependencies.
-  const initialSectionIds = context.index.chunks.flatMap((s, i) => {
-    const lines = context.changedLines.get(s.sourcePath)?.[s.revision === 'base' ? 'LEFT' : 'RIGHT'];
-    const changedCode = !/\.md$/i.test(s.sourcePath) && ['head', 'base'].includes(s.revision) && lines && [...lines].some(line => line >= s.startLine && line <= s.endLine);
-    return isDocument(s) || changedCode ? [i + 1] : [];
-  });
+  const initialSectionIds = [...context.index.chunks.flatMap((s, i) => isDocument(s) ? [i + 1] : []),
+    ...changedProductionSections(context)];
   const evidence = await collectIndexedContext(context.index, config,
-    `Проверь актуальность README/docs после изменений PR. Начальный контекст уже содержит все README/docs из head и изменённые участки кода head/base. Не перечитывай выбранные разделы; запрашивай только недостающие определения и места использования изменённых публичных API, параметров и команд. Сравни поведение до и после изменения. Не расширяй аудит на неизменённые функции без связи с diff. Не требуй описания внутренних деталей и не предлагай документировать баги.\n${context.diff}`, {
+    `Проверь актуальность README/docs после изменений PR. Начальный контекст уже содержит все README/docs из head, изменённый production-код head и удалённые определения base. Diff содержит изменённые строки до/после. Исторические версии и тесты доступны в каталоге: читай их только когда без них нельзя подтвердить конкретное изменение публичного поведения. Не перечитывай выбранные разделы; запрашивай только недостающие определения и места использования изменённых публичных API, параметров и команд. Не расширяй аудит на неизменённые функции без связи с diff. Не требуй описания внутренних деталей и не предлагай документировать баги.\n${context.diff}`, {
       fetchImpl, onEvent, maxCharacters: 140000, initialSectionIds
     });
   if (evidence.retrieval.status !== 'checked') return { status: 'limit', summary: 'Аудит документации не завершён. ' + evidence.retrieval.reason,

@@ -122,6 +122,31 @@ test('incomplete retrieval names deferred sections and distinguishes character a
   assert.doesNotMatch(report, /Статус аудита: limit|Подтверждённых расхождений документации не найдено/);
 });
 
+test('audit seeds current production and deleted definitions without exhausting budget on history and tests', async () => {
+  const chunk = (revision, sourcePath, size) => ({ path: `${revision}:${sourcePath}`, sourcePath, revision,
+    startLine: 1, endLine: 70, heading: sourcePath, text: 'x'.repeat(size) });
+  const chunks = [chunk('head', 'docs/guide.md', 70000), chunk('head', 'Client.kt', 35000),
+    chunk('base', 'Client.kt', 35000), chunk('head', 'app/src/desktopTest/ClientTest.kt', 65000),
+    chunk('base', 'Deleted.kt', 5000)];
+  const changedLines = new Map(['Client.kt', 'app/src/desktopTest/ClientTest.kt', 'Deleted.kt']
+    .map(path => [path, { LEFT: new Set([1]), RIGHT: new Set([1]) }]));
+  const context = { diff: 'production API changed; old API deleted; tests expanded', omitted: [], changedLines,
+    index: { chunks, documents: chunks.map(s => s.path) } };
+  const config = { apiKey: 'test', model: 'test', baseUrl: 'https://example.invalid' };
+  const result = await auditDocumentation(config, context, { fetchImpl: async (_url, init) => {
+    const { messages } = JSON.parse(init.body), payload = JSON.parse(messages[1].content);
+    if (/^Ты агент поиска|^Ты независимый проверяющий/.test(messages[0].content)) {
+      assert.deepEqual(payload.readSections.map(s => s.path), ['head:docs/guide.md', 'head:Client.kt', 'base:Deleted.kt']);
+      assert.ok(payload.catalog.some(s => s.path === 'base:Client.kt'));
+      assert.ok(payload.catalog.some(s => s.path.includes('desktopTest')));
+      return response({ action: 'done' });
+    }
+    return response({ summary: 'Public API covered.', findings: [] });
+  } });
+  assert.equal(result.status, 'checked');
+  assert.equal(result.retrieval.characters, 110000);
+});
+
 test('re-reading preloaded sections switches to independent coverage without marking them checked automatically', async () => {
   const index = { documents: ['head:API.kt'], chunks: [{ path: 'head:API.kt', sourcePath: 'API.kt', revision: 'head', startLine: 1, endLine: 1, text: 'fun api() = Unit', heading: 'API' }] };
   const config = { apiKey: 'test', model: 'test', baseUrl: 'https://example.invalid' };
