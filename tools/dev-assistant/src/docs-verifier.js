@@ -122,7 +122,11 @@ async function verifyBatch(config, { originals, updates, diff, patch, index, fet
     { role: 'user', content: JSON.stringify({ diff, patch, originals, updates, sources: evidence.sources }) }
   ], fetchImpl, true, 4000);
   const result = validateDocsVerification(JSON.parse(raw), updates.map(u => u.path));
-  if (!result.approved) throw new Error(`Проверяющий отклонил документацию: ${result.issues.map(i => `${i.path}: ${i.reason}`).join('; ')}`);
+  if (!result.approved) {
+    const error = new Error(`Проверяющий отклонил документацию: ${result.issues.map(i => `${i.path}: ${i.reason}`).join('; ')}`);
+    error.documentationIssues = result.issues;
+    throw error;
+  }
   onEvent({ agent: 'docs_verifier', status: 'done', detail: `Проверены ${updates.length} документов и относительные ссылки` });
   return { reviewedPaths: result.reviewedPaths, retrieval: evidence.retrieval };
 }

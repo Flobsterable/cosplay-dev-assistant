@@ -61,11 +61,12 @@ export async function syncDocs(config, mcp, base, { apply = false, head = 'HEAD'
   ], fetchImpl, false, 8000);
   emit('change_agent', 'done', 'Анализ передан docs_sync_agent');
   emit('docs_sync_agent', 'running', 'Подготовка новых версий затронутых Markdown-файлов');
-  async function generate(documents) {
+  async function generate(documents, repair = null) {
     const paths = Object.keys(documents);
     const messages = [
     { role: 'system', content: `Ты docs_sync_agent. ${policy} Сверь отчёт с diff. Обновляй только факты, подтверждённые diff, сохраняя остальную документацию. Проверяй КАЖДЫЙ документ по его назначению: упоминание фичи в одном техническом файле не означает актуальность остальных. Новые экраны и переходы должны попасть в описание фич, карту экранов, диаграммы и пользовательские флоу, а технические детали — в руководство реализации. Устраняй противоречащие diff старые утверждения, в том числе о сохранении состояния и возврате. Даже если часть документов уже обновлена в PR, проверь остальные; не возвращай пустое updates только из-за наличия названий новых классов где-либо. Верни JSON {"summary":"что и почему изменено","updates":[{"path":"docs/architecture.md","content":"полный Markdown файла"}]}. Разрешены только ${paths.join(', ')}. Не меняй код или настройки. Не создавай новые пути; выбирай только существующие документы из переданного списка. Если каждый переданный документ уже актуален для своего назначения, updates должен быть []. Не сокращай существующие разделы без причины. Верни полное содержимое каждого изменённого файла, не diff.` },
-    { role: 'user', content: JSON.stringify({ analysis, diff: changes.diff, sources: context.sources, documents, documentCatalog: editableDocs }) }
+    { role: 'user', content: JSON.stringify({ analysis, diff: changes.diff, sources: context.sources, documents, documentCatalog: editableDocs,
+      ...(repair ? { repair: { instruction: 'Исправь предложенные документы по замечаниям независимого проверяющего. Сверь замечания с исходниками; верни полные исправленные файлы. Если правку нельзя подтвердить, оставь исходный текст.', ...repair } } : {}) }) }
     ];
     for (let attempt = 0; attempt < 2; attempt++) {
       const proposed = await complete(config, messages, fetchImpl, true, 8000);
@@ -77,23 +78,31 @@ export async function syncDocs(config, mcp, base, { apply = false, head = 'HEAD'
       }
     }
   }
-  let proposal;
-  try {
-    try { proposal = await generate(originals); }
+  async function generateAll(documents, repair = null) {
+    try { return await generate(documents, repair); }
     catch (error) {
-      if (!/Ответ модели обрезан лимитом токенов/.test(error.message) || editableDocs.length < 2) throw error;
+      const paths = Object.keys(documents);
+      if (!/Ответ модели обрезан лимитом токенов/.test(error.message) || paths.length < 2) throw error;
       emit('docs_sync_agent', 'retry', 'Общий ответ обрезан: генерирую документы отдельно, запись только после полной проверки');
       const parts = [];
-      for (const path of editableDocs) {
+      for (const path of paths) {
         emit('docs_sync_agent', 'running', `Проверяю ${path}`);
-        parts.push(await generate({ [path]: originals[path] }));
+        parts.push(await generate({ [path]: documents[path] }, repair && {
+          issues: repair.issues.filter(i => i.path === path), previousUpdates: repair.previousUpdates.filter(u => u.path === path)
+        }));
       }
-      proposal = validateUpdates({ summary: parts.map(p => p.summary).join('\n'), updates: parts.flatMap(p => p.updates) }, editableDocs);
+      return validateUpdates({ summary: parts.map(p => p.summary).join('\n'), updates: parts.flatMap(p => p.updates) }, paths);
     }
+  }
+  let proposal;
+  try {
+    proposal = await generateAll(originals);
   } catch (error) { throw new Error(`Предложение документации отклонено: ${error.message}`); }
-  const updates = proposal.updates.map(update => ({ ...update, content: update.content.replace(/\r\n/g, '\n').trimEnd() + '\n' }))
+  const normalize = updates => updates.map(update => ({ ...update, content: update.content.replace(/\r\n/g, '\n').trimEnd() + '\n' }))
     .filter(update => update.content !== originals[update.path].replace(/\r\n/g, '\n'));
-  const patch = updates.map(update => createTwoFilesPatch(`a/${update.path}`, `b/${update.path}`, originals[update.path].replace(/\r\n/g, '\n'), update.content)).join('\n');
+  let updates = normalize(proposal.updates);
+  const makePatch = () => updates.map(update => createTwoFilesPatch(`a/${update.path}`, `b/${update.path}`, originals[update.path].replace(/\r\n/g, '\n'), update.content)).join('\n');
+  let patch = makePatch();
   // A repeated historical PR may run on a newer checkout. Verify against its
   // current code too, so an old diff does not restore an obsolete API contract.
   const verificationCorpus = updates.length && changes.checkoutHead !== changes.head
@@ -101,9 +110,23 @@ export async function syncDocs(config, mcp, base, { apply = false, head = 'HEAD'
   if (updates.length && (verificationCorpus.head !== changes.checkoutHead || verificationCorpus.omitted.some(f => /лимит/.test(f.reason)))) {
     throw new Error('Не удалось полностью прочитать текущий код для проверки документации. Файлы не сохранены.');
   }
-  const verification = await verifyDocumentation(config, { root: config.projectRoot, originals, updates,
-    diff: changes.diff, patch, index: verificationCorpus.index, fetchImpl,
-    onEvent: event => emit(event.agent, event.status, event.detail) });
+  let verification;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      verification = await verifyDocumentation(config, { root: config.projectRoot, originals, updates,
+        diff: changes.diff, patch, index: verificationCorpus.index, fetchImpl,
+        onEvent: event => emit(event.agent, event.status, event.detail) });
+      break;
+    } catch (error) {
+      if (!error.documentationIssues || attempt === 2) throw error;
+      const paths = [...new Set(error.documentationIssues.map(i => i.path))];
+      emit('docs_sync_agent', 'repair', `Исправляю замечания проверяющего: ${paths.join(', ')} (${attempt + 1}/2)`);
+      const corrected = await generateAll(Object.fromEntries(paths.map(path => [path, originals[path]])),
+        { issues: error.documentationIssues, previousUpdates: updates.filter(u => paths.includes(u.path)) });
+      updates = normalize([...updates.filter(u => !paths.includes(u.path)), ...corrected.updates]);
+      patch = makePatch();
+    }
+  }
   if (apply && updates.length) {
     const targets = [];
     for (const update of updates) {

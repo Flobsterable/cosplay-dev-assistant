@@ -279,6 +279,51 @@ test('truncated multi-document generation falls back to single files and verifie
   assert.equal(await readFile(resolve(root, 'docs/config.md'), 'utf8'), updated);
 });
 
+for (const alwaysReject of [false, true]) {
+  test(`sync sends verifier feedback to the author and ${alwaysReject ? 'stops after bounded repairs' : 'checks the correction before saving'}`, async t => {
+    const { root, config, base, readme } = await fixture(t);
+    const original = await readFile(resolve(root, 'docs/config.md'), 'utf8');
+    const mcp = await connectProject(root); t.after(() => mcp.close());
+    let reviews = 0, repairs = 0;
+    const corrected = '# Configuration\n\nClient.timeoutMs defaults to 5000 ms.\n';
+    const promise = syncDocs(config, mcp, base, { apply: true, fetchImpl: async (_url, init) => {
+      const { messages } = JSON.parse(init.body), system = messages[0].content, payload = JSON.parse(messages[1].content);
+      const found = retrieval(system, payload); if (found) return found;
+      assert.equal(await readFile(resolve(root, 'docs/config.md'), 'utf8'), original);
+      assert.equal(await readFile(resolve(root, 'README.md'), 'utf8'), readme);
+      if (system.startsWith('Ты change_agent')) return new Response(JSON.stringify({ choices: [{ message: { content: 'Timeout added.' } }] }));
+      if (system.startsWith('Ты docs_sync_agent')) {
+        if (payload.repair) {
+          repairs++;
+          assert.deepEqual(Object.keys(payload.documents), ['docs/config.md']);
+          assert.match(payload.repair.issues[0].reason, /Wrong timeout/);
+          assert.equal(payload.repair.previousUpdates[0].path, 'docs/config.md');
+          return response({ summary: 'Correct the parameter default.', updates: [{ path: 'docs/config.md', content: corrected }] });
+        }
+        return response({ summary: 'Describe timeout.', updates: [
+          { path: 'README.md', content: readme + '\nThe timeout can be configured.\n' },
+          { path: 'docs/config.md', content: '# Configuration\n\nClient.timeoutMs defaults to 9000 ms.\n' }
+        ] });
+      }
+      reviews++;
+      const reject = alwaysReject || reviews === 1;
+      return response({ approved: !reject, reviewedPaths: payload.updates.map(u => u.path),
+        issues: reject ? [{ path: 'docs/config.md', reason: 'Wrong timeout: the code default is 5000.' }] : [] });
+    } });
+    if (alwaysReject) {
+      await assert.rejects(promise, /Wrong timeout/);
+      assert.equal(reviews, 3); assert.equal(repairs, 2);
+      assert.equal(await readFile(resolve(root, 'docs/config.md'), 'utf8'), original);
+      assert.equal(await readFile(resolve(root, 'README.md'), 'utf8'), readme);
+    } else {
+      assert.equal((await promise).verification.status, 'checked');
+      assert.equal(reviews, 2); assert.equal(repairs, 1);
+      assert.equal(await readFile(resolve(root, 'docs/config.md'), 'utf8'), corrected);
+      assert.match(await readFile(resolve(root, 'README.md'), 'utf8'), /timeout can be configured/);
+    }
+  });
+}
+
 test('link checks parse reference links and images, ignore code examples and tolerate old broken links', async t => {
   const { root, readme } = await fixture(t);
   const originals = { 'README.md': readme + '\n[Old](old-missing.md)\n' };
