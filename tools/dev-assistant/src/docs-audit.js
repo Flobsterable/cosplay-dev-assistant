@@ -27,20 +27,31 @@ export async function auditDocumentation(config, context, { codeFindings = [], f
   onEvent({ agent: 'docs_auditor', status: 'running', detail: 'Проверяю необходимость обновления README/docs в PR' });
   const docs = context.index.chunks.filter(isDocument);
   const documents = [...new Set(docs.map(s => s.sourcePath))];
-  if (docs.reduce((sum, s) => sum + s.text.length, 0) > 80000 || context.omitted.some(f => /лимит/.test(f.reason))) {
-    return { status: 'limit', summary: 'Аудит документации не завершён: превышен лимит корпуса.', findings: [], sources: [] };
+  const documentationCharacters = docs.reduce((sum, s) => sum + s.text.length, 0);
+  const omitted = context.omitted.filter(f => /лимит/.test(f.reason));
+  if (documentationCharacters > 80000 || omitted.length) {
+    const reasons = [
+      ...(documentationCharacters > 80000 ? [`README/docs: ${documentationCharacters} символов при лимите 80000.`] : []),
+      ...omitted.map(f => `${f.path}: ${f.reason}.`)
+    ];
+    return { status: 'limit', summary: 'Аудит документации не завершён. ' + reasons.join(' '), findings: [], sources: [], omitted, documentationCharacters };
   }
+  // Use the existing combined ceiling (60k retrieval + 80k docs) once, without
+  // reading the same documents in two independent budgets. Seed changed code and
+  // all head docs before asking the model to look for additional dependencies.
+  const initialSectionIds = context.index.chunks.flatMap((s, i) => {
+    const lines = context.changedLines.get(s.sourcePath)?.[s.revision === 'base' ? 'LEFT' : 'RIGHT'];
+    const changedCode = !/\.md$/i.test(s.sourcePath) && ['head', 'base'].includes(s.revision) && lines && [...lines].some(line => line >= s.startLine && line <= s.endLine);
+    return isDocument(s) || changedCode ? [i + 1] : [];
+  });
   const evidence = await collectIndexedContext(context.index, config,
-    `Проверь актуальность README/docs после изменений PR. Найди определения изменённых публичных API, параметров, команд и их места использования. Сравни поведение до и после изменения. Не требуй описания внутренних деталей и не предлагай документировать баги.\n${context.diff}`, {
-      fetchImpl, onEvent, maxCharacters: 60000
+    `Проверь актуальность README/docs после изменений PR. Начальный контекст уже содержит все README/docs из head и изменённые участки кода head/base. Не перечитывай выбранные разделы; запрашивай только недостающие определения и места использования изменённых публичных API, параметров и команд. Сравни поведение до и после изменения. Не расширяй аудит на неизменённые функции без связи с diff. Не требуй описания внутренних деталей и не предлагай документировать баги.\n${context.diff}`, {
+      fetchImpl, onEvent, maxCharacters: 140000, initialSectionIds
     });
-  if (evidence.retrieval.status !== 'checked') return { status: 'limit', summary: 'Аудит документации не завершён: недостаточно контекста.', findings: [], sources: [], retrieval: evidence.retrieval };
+  if (evidence.retrieval.status !== 'checked') return { status: 'limit', summary: 'Аудит документации не завершён. ' + evidence.retrieval.reason,
+    findings: [], sources: evidence.sources, retrieval: evidence.retrieval, documentationCharacters };
   const sources = [...evidence.sources];
-  // Missing documentation must be judged against the complete available README/docs,
-  // not merely against a search result that happened to miss the relevant section.
-  for (const { tokens, ...source } of docs) {
-    if (!sources.some(s => s.path === source.path && s.startLine === source.startLine)) sources.push(source);
-  }
+  // All docs were seeded and counted before retrieval; never append unbudgeted text.
   const input = { diff: context.diff, documents, codeFindings,
     anchors: [...context.changedLines].map(([path, lines]) => ({ path, LEFT: [...lines.LEFT], RIGHT: [...lines.RIGHT] })),
     sources: sources.map((s, i) => ({ id: i + 1, ...s })) };

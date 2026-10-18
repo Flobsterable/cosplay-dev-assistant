@@ -37,5 +37,9 @@ async function main() {
       console.log(inline.published ? `Inline-замечания опубликованы: ${inline.comments} новых` : inline.reason);
     }
   } else console.log(body);
+  if (result.documentationAudit?.status === 'limit') {
+    console.error('Аудит документации не завершён. Причина и непрочитанные разделы указаны в review.md/review.json; проверка не считается успешной.');
+    process.exitCode = 1;
+  }
 }
 main().catch(error => { console.error(`Ошибка AI-ревью: ${error.message}`); process.exitCode = 1; });

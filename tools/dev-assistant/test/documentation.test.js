@@ -11,6 +11,8 @@ import { buildReviewContext } from '../src/review-context.js';
 import { syncDocs } from '../src/sync-docs.js';
 import { connectProject } from '../src/mcp-client.js';
 import { renderReview } from '../src/pr-review.js';
+import { collectIndexedContext } from '../src/document-agent.js';
+import { createServer } from 'node:http';
 
 const exec = promisify(execFile);
 const response = value => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(value) } }] }));
@@ -75,6 +77,74 @@ test('audit does not report a clean result when source retrieval is incomplete',
   const { config, context } = await fixture(t);
   const audit = await auditDocumentation(config, context, { fetchImpl: async () => response({ action: 'read', paths: ['unknown.kt'] }) });
   assert.equal(audit.status, 'limit'); assert.deepEqual(audit.findings, []);
+  assert.equal(audit.retrieval.invalidRequests, 8);
+  assert.equal(audit.retrieval.steps, 8);
+  assert.match(audit.summary, /Отклонено запросов чтения: 8/);
+  assert.ok(audit.sources.length > 0);
+});
+
+test('audit preloads changed code and all docs above the old search budget, with independent coverage', async t => {
+  const { root, config, context } = await fixture(t);
+  await writeFile(resolve(root, 'docs/large.md'), '# Guide\n' + 'Documentation context. '.repeat(2900));
+  const git = async (...args) => (await exec('git', ['-C', root, ...args])).stdout.trim();
+  await git('add', '.'); await git('commit', '-m', 'large guide');
+  const current = await buildReviewContext(root, context.base, await git('rev-parse', 'HEAD'));
+  let retrievalCalls = 0, coverage = false;
+  const audit = await auditDocumentation(config, current, { fetchImpl: async (_url, init) => {
+    const { messages } = JSON.parse(init.body), system = messages[0].content, payload = JSON.parse(messages[1].content);
+    if (/^Ты агент поиска|^Ты независимый проверяющий/.test(system)) {
+      retrievalCalls++;
+      assert.ok(payload.readSections.some(s => s.path === 'head:Client.kt' && s.text.includes('timeoutMs')));
+      assert.ok(payload.readSections.some(s => s.path === 'head:docs/large.md'));
+      assert.ok(payload.readSections.reduce((sum, s) => sum + s.text.length, 0) > 60000);
+      if (/^Ты независимый/.test(system)) coverage = true;
+      return response({ action: 'done', reason: 'Seeded sources cover the change.' });
+    }
+    return response({ summary: 'Docs checked.', findings: [] });
+  } });
+  assert.equal(audit.status, 'checked'); assert.equal(retrievalCalls, 2); assert.equal(coverage, true);
+  assert.ok(audit.retrieval.characters <= 140000);
+});
+
+test('incomplete retrieval names deferred sections and distinguishes character and step limits', async () => {
+  const index = { documents: ['head:Large.kt'], chunks: [{ path: 'head:Large.kt', sourcePath: 'Large.kt', revision: 'head', startLine: 1, endLine: 70, text: '123456', heading: 'API' }] };
+  const config = { apiKey: 'test', model: 'test', baseUrl: 'https://example.invalid' };
+  const result = await collectIndexedContext(index, config, 'Check API', { maxCharacters: 5, initialSectionIds: [1], fetchImpl: async () => response({ action: 'done' }) });
+  assert.equal(result.retrieval.status, 'limit');
+  assert.deepEqual(result.retrieval.limits, ['characters']);
+  assert.equal(result.retrieval.steps, 2);
+  assert.deepEqual(result.retrieval.deferredSections, [{ sectionId: 1, path: 'head:Large.kt', startLine: 1, endLine: 70, characters: 6 }]);
+  const report = renderReview({ context: { head: 'a'.repeat(40), base: 'b'.repeat(40), files: [], omitted: [] }, sources: [], retrieval: { status: 'checked' }, review: { summary: 'Code', findings: [] },
+    documentationAudit: { status: 'limit', summary: result.retrieval.reason, retrieval: result.retrieval, findings: [], sources: [] } }, 'o/r');
+  assert.match(report, /Статус аудита: не завершён/);
+  assert.match(report, /head:Large.kt:1-70/);
+  assert.match(report, /2\/8/); assert.match(report, /0\/5/);
+  assert.doesNotMatch(report, /Статус аудита: limit|Подтверждённых расхождений документации не найдено/);
+});
+
+test('CLI saves an incomplete audit report but exits nonzero', async t => {
+  const { root, base, head } = await fixture(t);
+  const server = createServer(async (req, res) => {
+    let raw = ''; for await (const chunk of req) raw += chunk;
+    const { messages } = JSON.parse(raw), system = messages[0].content, payload = JSON.parse(messages[1].content);
+    const value = /^Ты агент поиска|^Ты независимый проверяющий/.test(system)
+      ? payload.question.startsWith('Проверь актуальность README/docs')
+        ? { action: 'read', paths: ['unknown.kt'] } : { action: 'done' }
+      : { summary: 'Code checked.', findings: [] };
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(value) } }] }));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const output = resolve(root, 'report');
+  await assert.rejects(exec(process.execPath, [resolve('src/review-cli.js'), '--base', base, '--head', head, '--repo', 'o/r', '--output', output], {
+    env: { ...process.env, PROJECT_ROOT: root, LLM_API_KEY: 'fake', LLM_MODEL: 'fake', LLM_BASE_URL: `http://127.0.0.1:${server.address().port}`, GITHUB_STEP_SUMMARY: '' }
+  }), error => error.code === 1 && /не считается успешной/.test(error.stderr));
+  const report = JSON.parse(await readFile(resolve(output, 'review.json'), 'utf8'));
+  assert.equal(report.documentationAudit.status, 'limit');
+  assert.equal(report.documentationAudit.retrieval.invalidRequests, 8);
+  assert.ok(report.documentationAudit.sources.length);
+  assert.ok(!report.documentationAudit.sources.some(s => Object.hasOwn(s, 'text')));
 });
 
 test('audit validation rejects invented documents, unchanged lines and unsupported evidence', async t => {
