@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 import { buildReviewContext, changedLines, reviewable } from '../src/review-context.js';
-import { reviewPullRequest, validateReview, renderReview, coalesceFindings } from '../src/pr-review.js';
+import { reviewPullRequest, validateReview, renderReview, coalesceFindings, validatedReviewCall } from '../src/pr-review.js';
 import { publishReview } from '../src/review-github.js';
 const exec = promisify(execFile);
 const reply = data => new Response(JSON.stringify(data), { status: 200 });
@@ -106,6 +106,53 @@ test('review selects code/docs through the agent, verifies the draft and formats
   assert.match(markdown, /Потенциальные баги/); assert.match(markdown, /Архитектурные проблемы/); assert.match(markdown, /Рекомендации/);
   assert.match(markdown, new RegExp(head));
   assert.ok(!markdown.includes('@someone')); assert.ok(!markdown.includes('<tag>'));
+});
+
+test('validation repair retains a real finding and rejects invalid anchors and sources after bounded retries', async t => {
+  const { root, base, head } = await fixture(t), context = await buildReviewContext(root, base, head);
+  context.baseRuleIds = new Set(['B-CORRECTNESS']);
+  const finding = { category: 'bug', priority: 'P1', path: 'LoadingBlock.kt', side: 'RIGHT', line: 1, title: 'Zero divisor', body: 'divide(2) fails.', sources: [1], rules: [{ layer: 'base', id: 'B-CORRECTNESS' }] };
+  const validate = raw => validateReview(raw, context, [{}]);
+  const messages = [{ role: 'system', content: 'Review' }, { role: 'user', content: 'Original context' }];
+  let calls = 0;
+  const result = await validatedReviewCall(messages, async conversation => {
+    calls++;
+    if (calls === 2) {
+      assert.equal(conversation[1].content, 'Original context');
+      assert.match(conversation.at(-1).content, /LoadingBlock.kt:RIGHT:999/);
+      assert.equal(JSON.parse(conversation.at(-2).content).findings[0].line, 999);
+    }
+    return { summary: 'Regression', findings: [{ ...finding, line: calls === 1 ? 999 : 1 }] };
+  }, validate);
+  assert.equal(calls, 2); assert.equal(result.findings[0].line, 1); assert.equal(messages.length, 2);
+  calls = 0;
+  await assert.rejects(validatedReviewCall(messages, async () => {
+    calls++; return { summary: 'Regression', findings: [{ ...finding, sources: [99] }] };
+  }, validate), /sources/);
+  assert.equal(calls, 3);
+  calls = 0;
+  await assert.rejects(validatedReviewCall(messages, async () => { calls++; throw new Error('HTTP 401'); }, validate), /401/);
+  assert.equal(calls, 1);
+});
+
+test('both independent reviewers and verifier repair invalid replies before publication', async t => {
+  const { config, base, head } = await fixture(t);
+  const attempts = { base: 0, project: 0, verifier: 0 }, events = [];
+  const fetchImpl = async (_url, init) => {
+    const body = JSON.parse(init.body), payload = JSON.parse(body.messages[1].content);
+    if (body.messages[0].content.startsWith('Ты docs_auditor')) return modelReply({ summary: 'Docs current', findings: [] });
+    if (/^Ты агент поиска|^Ты независимый проверяющий/.test(body.messages[0].content)) return modelReply(payload.readSections.length
+      ? { action: 'done' } : { action: 'read', paths: ['head:LoadingBlock.kt', 'head:Caller.kt'] });
+    const layer = payload.draft ? 'verifier' : body.messages[0].content.includes('проход project') ? 'project' : 'base';
+    const attempt = ++attempts[layer];
+    const rules = layer === 'project' ? [{ layer: 'project', id: 'P-DIVISION' }] : [{ layer: 'base', id: 'B-CORRECTNESS' }];
+    return modelReply({ summary: 'Regression', findings: [{ category: 'bug', priority: 'P1', path: 'LoadingBlock.kt', side: 'RIGHT', line: attempt === 1 ? 999 : 1,
+      title: 'Zero divisor', body: 'divide(2) fails.', sources: [payload.documentation.find(s => s.path === 'head:LoadingBlock.kt').id], rules }] });
+  };
+  const result = await reviewPullRequest(config, { base, head, fetchImpl, onEvent: e => events.push(e) });
+  assert.deepEqual(attempts, { base: 2, project: 2, verifier: 2 });
+  assert.equal(events.filter(e => e.status === 'retry').length, 3);
+  assert.equal(result.review.findings[0].line, 1);
 });
 
 test('publication updates only the bot marker and skips a head that changed before write', async () => {

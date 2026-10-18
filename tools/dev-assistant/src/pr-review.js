@@ -8,6 +8,20 @@ import { auditDocumentation } from './docs-audit.js';
 export function ruleIds(text, prefix) { return new Set([...text.matchAll(/^##\s+([BP]-[A-Z0-9_-]+)\b/gm)].map(m => m[1]).filter(id => id.startsWith(prefix + '-'))); }
 
 const categories = ['bug', 'architecture', 'recommendation'];
+export async function validatedReviewCall(messages, call, validate, onRetry = () => {}) {
+  const conversation = [...messages];
+  for (let attempt = 0; ; attempt++) {
+    const raw = await call(conversation);
+    try { return validate(raw); }
+    catch (error) {
+      if (attempt >= 2) throw error;
+      onRetry(error);
+      conversation.push({ role: 'assistant', content: JSON.stringify(raw) }, {
+        role: 'user', content: `Ответ не прошёл проверку: ${error.message}\nИсправь JSON по исходному контексту. path/side/line должны точно совпадать с anchors; sources — целые id из documentation; rules — только действующие ID разрешённого слоя. Не придумывай привязку для неподтверждённой проблемы. Проверь каждое замечание; удаляй его только если оно не подтверждается исходным контекстом. Верни полный исправленный JSON.`
+      });
+    }
+  }
+}
 export function coalesceFindings(findings) {
   const grouped = new Map();
   for (const item of findings) {
@@ -26,7 +40,10 @@ export function validateReview(value, context, sources) {
   if (!value || typeof value.summary !== 'string' || value.summary.length > 3000 || !Array.isArray(value.findings) || value.findings.length > 15) throw new Error('Некорректная структура ревью.');
   const seen = new Set();
   for (const item of value.findings) {
+    if (!item || typeof item !== 'object') throw new Error('Замечание должно быть объектом.');
     const lines = context.changedLines.get(item.path)?.[item.side];
+    if (!Number.isInteger(item.line) || !lines?.has(item.line)) throw new Error(`Недопустимая привязка ${item.path}:${item.side}:${item.line}; выбери изменённую строку из anchors.`);
+    if (!Array.isArray(item.sources) || !item.sources.length || item.sources.some(id => !Number.isInteger(id) || id < 1 || id > sources.length)) throw new Error(`Недопустимые sources для ${item.path}:${item.line}; допустимы id 1..${sources.length} из documentation.`);
     if (!categories.includes(item.category) || !['P1','P2','P3'].includes(item.priority) || !Number.isInteger(item.line) || !lines?.has(item.line) ||
       typeof item.title !== 'string' || !item.title.trim() || item.title.length > 200 || typeof item.body !== 'string' || !item.body.trim() || item.body.length > 2500 ||
       !Array.isArray(item.sources) || !item.sources.length || item.sources.some(id => !Number.isInteger(id) || id < 1 || id > sources.length)) throw new Error('Замечание не привязано к изменённой строке или проверенным источникам.');
@@ -81,14 +98,16 @@ ${context.diff}`;
   }
   async function runLayer(layer, rules) {
     onEvent({ agent: layer + '_reviewer', status: 'running', detail: layer === 'base' ? 'Общие правила агента' : 'Действующие правила проекта из base' });
-    const raw = await reviewCall([
+    const result = await validatedReviewCall([
       { role: 'system', content: policy + `
 Это независимый проход ${layer}. Проверяй только следующие правила; findings.rules должны содержать только layer=${layer}.
 ${rules}` },
       { role: 'user', content: JSON.stringify(input) }
-    ]);
-    const result = validateReview(raw, context, sources);
-    if (result.findings.some(f => f.rules.some(r => r.layer !== layer))) throw new Error('Ревьюер использовал правила другого слоя.');
+    ], reviewCall, raw => {
+      const result = validateReview(raw, context, sources);
+      if (result.findings.some(f => f.rules.some(r => r.layer !== layer))) throw new Error('Ревьюер использовал правила другого слоя.');
+      return result;
+    }, () => onEvent({ agent: layer + '_reviewer', status: 'retry', detail: 'Исправляю ответ модели после ошибки проверки структуры/привязки' }));
     onEvent({ agent: layer + '_reviewer', status: 'done', detail: `Замечаний: ${result.findings.length}` });
     return result;
   }
@@ -101,7 +120,7 @@ ${rules}` },
   const [baseReview, projectReview] = results.map(r => r.value);
   const draft = { summary: [baseReview.summary, projectReview.summary].join('\n'), findings: [...baseReview.findings, ...projectReview.findings] };
   onEvent({ agent: 'review_verifier', status: 'running', detail: 'Проверяю оба слоя и объединяю одинаковые проблемы' });
-  const verified = await reviewCall([
+  const review = await validatedReviewCall([
     { role: 'system', content: policy + `
 Базовые правила:
 ${profile}
@@ -109,9 +128,11 @@ ${profile}
 ${context.projectRules?.text || 'отсутствуют'}
 Проверь два независимых черновика. Удали ложные/старые/субъективные замечания. Объедини одинаковые проблемы и последствия одной причины, сохранив rules обоих слоёв. Если расхождение документации лишь следствие уже описанной ошибочной регрессии и устраняется исправлением этого бага, не создавай отдельное замечание и не предлагай документировать баг как правильное поведение. При этом не смешивай разные независимые проблемы лишь потому, что они на одной строке. Не добавляй новые проблемы.` },
     { role: 'user', content: JSON.stringify({ ...input, draft }) }
-  ]);
-  const review = validateReview(verified, context, sources);
-  for (const f of review.findings) if (!draft.findings.some(d => d.path === f.path && d.side === f.side && d.line === f.line)) throw new Error('Проверяющий добавил новое замечание вне черновиков.');
+  ], reviewCall, raw => {
+    const result = validateReview(raw, context, sources);
+    for (const f of result.findings) if (!draft.findings.some(d => d.path === f.path && d.side === f.side && d.line === f.line)) throw new Error('Проверяющий добавил новое замечание вне черновиков.');
+    return result;
+  }, () => onEvent({ agent: 'review_verifier', status: 'retry', detail: 'Исправляю ответ проверяющего после ошибки валидации' }));
   // A changed location appears once; retain all verified explanations and rule IDs.
   review.findings = coalesceFindings(review.findings);
   const documentationAudit = await auditDocumentation(config, context, { codeFindings: review.findings, fetchImpl, onEvent });
