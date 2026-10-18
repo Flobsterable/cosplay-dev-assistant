@@ -55,6 +55,8 @@ async function syncDocs(config, mcp, base, options = {}) {
       const input = JSON.parse(body.messages[1].content);
       return reply(JSON.stringify(input.readSections.length ? { action: 'done' } : { action: 'read', paths: input.catalog.map(d => d.path) }));
     }
+    if (body.messages[0].content.startsWith('Ты docs_verifier')) return reply(JSON.stringify({ approved: true,
+      reviewedPaths: JSON.parse(body.messages[1].content).updates.map(u => u.path), issues: [] }));
     return options.fetchImpl(url, init);
   } });
 }
@@ -307,6 +309,8 @@ test('sync searches API usages across files, updates README and docs, and repeat
   const fake = async (_url, init) => {
     const body = JSON.parse(init.body), payload = JSON.parse(body.messages[1].content);
     const system = body.messages[0].content;
+    if (system.startsWith('Ты docs_verifier')) return reply(JSON.stringify({ approved: true,
+      reviewedPaths: payload.updates.map(u => u.path), issues: [] }));
     if (/^Ты агент поиска|^Ты независимый проверяющий/.test(system)) {
       assert.ok(payload.catalog.some(d => d.path === 'head:Screen.kt'));
       assert.ok(!JSON.stringify(payload).includes('SECRET='));

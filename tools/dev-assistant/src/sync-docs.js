@@ -4,6 +4,7 @@ import { createTwoFilesPatch } from 'diff';
 import { complete, prepareQuestion } from './assistant.js';
 import { discoverEditableDocs } from './doc-paths.js';
 import { collectIndexedContext } from './document-agent.js';
+import { verifyDocumentation } from './docs-verifier.js';
 
 export function validateUpdates(value, editableDocs = []) {
   if (!value || typeof value.summary !== 'string' || !Array.isArray(value.updates) || value.updates.length > editableDocs.length) throw new Error('Некорректный ответ агента документации.');
@@ -25,7 +26,7 @@ async function docPath(root, file) {
 export async function syncDocs(config, mcp, base, { apply = false, head = 'HEAD', fetchImpl = fetch, onEvent = () => {} } = {}) {
   const trace = [];
   const emit = (agent, status, detail) => { const event = { agent, status, detail }; trace.push(event); onEvent(event); };
-  const plan = { mode: 'sequential', tasks: [{ agent: 'change_agent', task: 'Выделить изменения поведения из Git diff' }, { agent: 'docs_sync_agent', task: 'Обновить затронутую документацию' }] };
+  const plan = { mode: 'sequential', tasks: [{ agent: 'change_agent', task: 'Выделить изменения поведения из Git diff' }, { agent: 'docs_sync_agent', task: 'Обновить затронутую документацию' }, { agent: 'docs_verifier', task: 'Проверить новые утверждения и ссылки до записи' }] };
   emit('orchestrator', 'plan', 'sequential: change_agent → docs_sync_agent → проверка → diff');
   const changes = await mcp.diff(base, head);
   const evidence = await prepareQuestion(config.projectRoot, mcp, 'Изменения поведения, API, моделей, архитектуры, сборки и релиза');
@@ -67,6 +68,16 @@ export async function syncDocs(config, mcp, base, { apply = false, head = 'HEAD'
   const updates = proposal.updates.map(update => ({ ...update, content: update.content.replace(/\r\n/g, '\n').trimEnd() + '\n' }))
     .filter(update => update.content !== originals[update.path].replace(/\r\n/g, '\n'));
   const patch = updates.map(update => createTwoFilesPatch(`a/${update.path}`, `b/${update.path}`, originals[update.path].replace(/\r\n/g, '\n'), update.content)).join('\n');
+  // A repeated historical PR may run on a newer checkout. Verify against its
+  // current code too, so an old diff does not restore an obsolete API contract.
+  const verificationCorpus = updates.length && changes.checkoutHead !== changes.head
+    ? await mcp.syncContext(changes.base, changes.checkoutHead) : corpus;
+  if (updates.length && (verificationCorpus.head !== changes.checkoutHead || verificationCorpus.omitted.some(f => /лимит/.test(f.reason)))) {
+    throw new Error('Не удалось полностью прочитать текущий код для проверки документации. Файлы не сохранены.');
+  }
+  const verification = await verifyDocumentation(config, { root: config.projectRoot, originals, updates,
+    diff: changes.diff, patch, index: verificationCorpus.index, fetchImpl,
+    onEvent: event => emit(event.agent, event.status, event.detail) });
   if (apply && updates.length) {
     const targets = [];
     for (const update of updates) {
@@ -79,5 +90,5 @@ export async function syncDocs(config, mcp, base, { apply = false, head = 'HEAD'
     for (const target of targets) await writeFile(target.path, target.content);
   }
   emit('docs_sync_agent', 'done', `${updates.length} документов; ${apply ? 'изменения сохранены' : 'предпросмотр, файлы не изменены'}`);
-  return { answer: `${proposal.summary}\n\n${apply ? 'Сохранено' : 'Предпросмотр'}: ${updates.length} документов.\n\n${patch || 'Изменений нет.'}`, evidence, plan, trace, updates, patch, base: changes.base, head: changes.head };
+  return { answer: `${proposal.summary}\n\n${apply ? 'Сохранено' : 'Предпросмотр'}: ${updates.length} документов. Проверка: ${verification.status}.\n\n${patch || 'Изменений нет.'}`, evidence, plan, trace, updates, patch, verification, base: changes.base, head: changes.head };
 }
