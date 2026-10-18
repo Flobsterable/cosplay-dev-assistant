@@ -378,6 +378,33 @@ for (const rejectLast of [false, true]) {
   });
 }
 
+test('verification collects every batch issue and rechecks only changed or rejected prose', async t => {
+  const { root, config, context } = await fixture(t);
+  const originals = Object.fromEntries(['README.md', 'docs/config.md', 'docs/guide.md'].map(p => [p, '# Before\n' + 'a'.repeat(6000)]));
+  const updates = Object.keys(originals).map(path => ({ path, content: '# After\n' + 'b'.repeat(9000) }));
+  const approvals = new Map(), reviewed = [];
+  let repairing = false;
+  const verify = () => verifyDocumentation(config, { root, originals, updates, diff: context.diff, index: context.index, approvals,
+    fetchImpl: async (_url, init) => {
+      const { messages } = JSON.parse(init.body), system = messages[0].content, payload = JSON.parse(messages[1].content);
+      const found = retrieval(system, payload); if (found) return found;
+      const paths = payload.updates.map(u => u.path); reviewed.push(paths);
+      const issues = repairing ? [] : paths.filter(p => p !== 'README.md').map(path => ({ path, reason: 'Needs correction' }));
+      return response({ approved: !issues.length, reviewedPaths: paths, issues });
+    } });
+  await assert.rejects(verify(), error => {
+    assert.deepEqual(error.documentationIssues.map(i => i.path), ['docs/config.md', 'docs/guide.md']); return true;
+  });
+  assert.deepEqual(reviewed, [['README.md'], ['docs/config.md'], ['docs/guide.md']]);
+  repairing = true;
+  await verify();
+  assert.deepEqual(reviewed.slice(3), [['docs/config.md'], ['docs/guide.md']]);
+  // A previous approval cannot cover a subsequent change to that document.
+  updates[0].content += '\nChanged again.\n';
+  await verify();
+  assert.deepEqual(reviewed[5], ['README.md']);
+});
+
 test('links validate heading anchors against proposed docs and catch breakage in untouched documents', async t => {
   const { root } = await fixture(t);
   const originals = { 'README.md': '# Project\n[Settings](docs/config.md#настройки-api-1)\n',
@@ -442,7 +469,7 @@ for (const rejectLast of [false, true]) {
     await git('add', '.'); await git('commit', '-m', 'large documentation and source corpus');
     const mcp = await connectProject(root); t.after(() => mcp.close());
     const before = new Map();
-    let writes = 0, checks = 0;
+    let writes = 0, checks = 0, rejectedPath;
     const run = syncDocs(config, mcp, base, { apply: true, fetchImpl: async (_url, init) => {
       const { messages } = JSON.parse(init.body), system = messages[0].content, payload = JSON.parse(messages[1].content);
       if (/^Ты агент поиска|^Ты независимый проверяющий/.test(system)) {
@@ -461,7 +488,8 @@ for (const rejectLast of [false, true]) {
       assert.equal(payload.updates.length, 1);
       for (const [path, content] of before) assert.equal(await readFile(resolve(root, path), 'utf8'), content);
       const path = payload.updates[0].path;
-      return response({ approved: !(rejectLast && checks % 12 === 0), reviewedPaths: [path], issues: rejectLast && checks % 12 === 0 ? [{ path, reason: 'Unsupported claim.' }] : [] });
+      if (rejectLast && checks === 12) rejectedPath = path;
+      return response({ approved: path !== rejectedPath, reviewedPaths: [path], issues: path === rejectedPath ? [{ path, reason: 'Unsupported claim.' }] : [] });
     } });
     if (rejectLast) {
       await assert.rejects(run, /Проверяющий отклонил/);
@@ -471,7 +499,7 @@ for (const rejectLast of [false, true]) {
       assert.equal(result.updates.length, 12); assert.equal(result.verification.reviewedPaths.length, 12);
       for (const path of before.keys()) assert.match(await readFile(resolve(root, path), 'utf8'), /Client.timeoutMs defaults/);
     }
-    assert.equal(writes, rejectLast ? 14 : 12); assert.equal(checks, rejectLast ? 36 : 12);
+    assert.equal(writes, rejectLast ? 14 : 12); assert.equal(checks, rejectLast ? 14 : 12);
   });
 }
 
