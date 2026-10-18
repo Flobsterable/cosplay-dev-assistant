@@ -33,7 +33,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Flobsterable/cosplay-dev-assistant
-          ref: REPLACE_WITH_REVIEW_RUNTIME_SHA
+          ref: b8a24ccabc398f9c2d6ba6e9774b2831ecd4ef1e
           path: assistant
           persist-credentials: false
       - uses: actions/setup-node@v4

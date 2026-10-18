@@ -5,6 +5,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { readProjectDiff } from './project-diff.js';
+import { buildReviewContext } from './review-context.js';
 
 const exec = promisify(execFile);
 const root = resolve(process.argv[2] || process.cwd());
@@ -23,7 +24,15 @@ server.registerTool('get_current_branch', {
 
 server.registerTool('get_project_diff', {
   description: 'Diff Kotlin/Gradle/release.yml от base до HEAD. Только закоммиченные изменения.',
-  inputSchema: { base: z.string().min(1).max(200) }, annotations: readOnly
-}, async ({ base }) => result(await readProjectDiff(root, base)));
+  inputSchema: { base: z.string().min(1).max(200), head: z.string().min(1).max(200).optional() }, annotations: readOnly
+}, async ({ base, head }) => result(await readProjectDiff(root, base, head)));
+
+server.registerTool('get_sync_context', {
+  description: 'Каталог и поисковый индекс закоммиченных исходников и документации для обновления docs. Симлинки и секреты исключены.',
+  inputSchema: { base: z.string().min(1).max(200), head: z.string().min(1).max(200).optional() }, annotations: readOnly
+}, async ({ base, head }) => {
+  const context = await buildReviewContext(root, base, head || 'HEAD');
+  return result({ head: context.head, index: context.index, omitted: context.omitted });
+});
 
 await server.connect(new StdioServerTransport());

@@ -25,7 +25,8 @@ export async function connectProject(projectRoot) {
   }
   return {
     client,
-    diff: base => call('get_project_diff', { base }),
+    diff: (base, head) => call('get_project_diff', { base, ...(head ? { head } : {}) }),
+    syncContext: (base, head) => call('get_sync_context', { base, ...(head ? { head } : {}) }),
     async context() {
       const { branch } = await call('get_current_branch');
       return { branch, tools: ['get_current_branch'] };

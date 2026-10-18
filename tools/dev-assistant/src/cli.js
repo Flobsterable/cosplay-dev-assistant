@@ -27,10 +27,17 @@ async function main() {
     async function ask(input, retrieve = false) {
       if (/^\/sync(?:\s|$)/.test(input)) {
         const parts = input.split(/\s+/).slice(1);
+        let head = 'HEAD';
+        const headIndex = parts.indexOf('--head');
+        if (headIndex !== -1) {
+          if (!parts[headIndex + 1] || parts[headIndex + 1].startsWith('-')) throw new Error('После --head укажите Git ref или SHA.');
+          head = parts[headIndex + 1];
+          parts.splice(headIndex, 2);
+        }
         const apply = parts.includes('--apply');
         const refs = parts.filter(p => p !== '--apply');
-        if (refs.length > 1) throw new Error('Формат: /sync HEAD~1 [--apply]');
-        const result = await syncDocs(config, mcp, refs[0] || 'HEAD~1', { apply,
+        if (refs.length > 1) throw new Error('Формат: /sync BASE [--head SHA] [--apply]');
+        const result = await syncDocs(config, mcp, refs[0] || 'HEAD~1', { apply, head,
           onEvent: event => console.log(`[${event.agent}] ${event.status}: ${event.detail}`) });
         console.log('\n' + result.answer);
         return;

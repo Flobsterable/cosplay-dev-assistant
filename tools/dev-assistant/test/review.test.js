@@ -82,6 +82,10 @@ test('review selects code/docs through the agent, verifies the draft and formats
     const body = JSON.parse(init.body), payload = JSON.parse(body.messages[1].content);
     if (/^Ты агент поиска|^Ты независимый проверяющий/.test(body.messages[0].content)) return modelReply(payload.readSections.length
       ? { action: 'done' } : { action: 'read', paths: ['head:LoadingBlock.kt', 'head:Caller.kt', 'head:docs/contracts.md'] });
+    if (body.messages[0].content.startsWith('Ты docs_auditor')) {
+      assert.equal(payload.codeFindings.length, 1);
+      return modelReply({ summary: 'Регрессия уже описана в ревью кода; docs не меняем.', findings: [] });
+    }
     reviewers++;
     assert.ok(payload.documentation.some(s => s.path === 'head:Caller.kt'));
     assert.ok(payload.documentation.some(s => s.path === 'head:docs/contracts.md'));
@@ -136,6 +140,7 @@ test('both independent reviewers and verifier repair invalid replies before publ
   const attempts = { base: 0, project: 0, verifier: 0 }, events = [];
   const fetchImpl = async (_url, init) => {
     const body = JSON.parse(init.body), payload = JSON.parse(body.messages[1].content);
+    if (body.messages[0].content.startsWith('Ты docs_auditor')) return modelReply({ summary: 'Docs current', findings: [] });
     if (/^Ты агент поиска|^Ты независимый проверяющий/.test(body.messages[0].content)) return modelReply(payload.readSections.length
       ? { action: 'done' } : { action: 'read', paths: ['head:LoadingBlock.kt', 'head:Caller.kt'] });
     const layer = payload.draft ? 'verifier' : body.messages[0].content.includes('проход project') ? 'project' : 'base';

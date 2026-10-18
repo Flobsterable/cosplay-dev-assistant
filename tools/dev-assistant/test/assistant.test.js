@@ -11,7 +11,7 @@ import { connectProject } from '../src/mcp-client.js';
 import { complete } from '../src/assistant.js';
 import { orchestrate as runOrchestrator, validatePlan } from '../src/orchestrator.js';
 import { collectDocumentation } from '../src/document-agent.js';
-import { syncDocs, validateUpdates } from '../src/sync-docs.js';
+import { syncDocs as runSyncDocs, validateUpdates } from '../src/sync-docs.js';
 import { readProjectDiff } from '../src/project-diff.js';
 
 const exec = promisify(execFile);
@@ -47,6 +47,19 @@ async function fixture(t) {
   return { root, git, base, mcp, config };
 }
 const reply = content => new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+
+async function syncDocs(config, mcp, base, options = {}) {
+  return runSyncDocs(config, mcp, base, { ...options, fetchImpl: async (url, init) => {
+    const body = JSON.parse(init.body);
+    if (/^Ты агент поиска|^Ты независимый проверяющий/.test(body.messages[0].content)) {
+      const input = JSON.parse(body.messages[1].content);
+      return reply(JSON.stringify(input.readSections.length ? { action: 'done' } : { action: 'read', paths: input.catalog.map(d => d.path) }));
+    }
+    if (body.messages[0].content.startsWith('Ты docs_verifier')) return reply(JSON.stringify({ approved: true,
+      reviewedPaths: JSON.parse(body.messages[1].content).updates.map(u => u.path), issues: [] }));
+    return options.fetchImpl(url, init);
+  } });
+}
 
 // Existing orchestration tests isolate routing from retrieval's own model protocol.
 async function orchestrate(config, mcp, question, options) {
@@ -87,7 +100,7 @@ test('RAG skips symlinked documents outside the repository', async t => {
 test('real MCP lists tools, reads changed branch and limits diff to code', async t => {
   const { git, base, mcp } = await fixture(t);
   const tools = await mcp.client.listTools();
-  assert.deepEqual(tools.tools.map(x => x.name).sort(), ['get_current_branch', 'get_project_diff']);
+  assert.deepEqual(tools.tools.map(x => x.name).sort(), ['get_current_branch', 'get_project_diff', 'get_sync_context']);
   assert.equal((await mcp.context()).files, undefined);
   assert.equal((await mcp.context()).branch, 'fixture-main');
   await git('switch', '-c', 'feature/demo');
@@ -282,6 +295,55 @@ test('documentation sync refuses dirty docs before calling the model', async t =
   const { config, root, base, mcp } = await fixture(t);
   await writeFile(resolve(root, 'docs/architecture.md'), document + 'Моя несохранённая правка.\n');
   await assert.rejects(syncDocs(config, mcp, base, { apply: true, fetchImpl: () => { throw new Error('must not call'); } }), /незакоммиченные/);
+});
+
+test('sync searches API usages across files, updates README and docs, and repeats without a diff', async t => {
+  const { root, git, base, mcp, config } = await fixture(t);
+  await writeFile(resolve(root, 'Screen.kt'), 'fun show(festival: Festival) = festival.city\n');
+  await git('add', 'Screen.kt');
+  await git('commit', '-m', 'use city on screen');
+  const head = await git('rev-parse', 'HEAD');
+  const readme = '# Cosplay\n\nKotlin приложение. Festival содержит city для отображения города.\n';
+  const guide = document + '\nScreen показывает Festival.city.\n';
+  let searched = false;
+  const fake = async (_url, init) => {
+    const body = JSON.parse(init.body), payload = JSON.parse(body.messages[1].content);
+    const system = body.messages[0].content;
+    if (system.startsWith('Ты docs_verifier')) return reply(JSON.stringify({ approved: true,
+      reviewedPaths: payload.updates.map(u => u.path), issues: [] }));
+    if (/^Ты агент поиска|^Ты независимый проверяющий/.test(system)) {
+      assert.ok(payload.catalog.some(d => d.path === 'head:Screen.kt'));
+      assert.ok(!JSON.stringify(payload).includes('SECRET='));
+      if (!searched) { searched = true; return reply(JSON.stringify({ action: 'search', query: 'Festival city' })); }
+      return reply(JSON.stringify({ action: 'done', reason: 'Определение и использование прочитаны' }));
+    }
+    assert.ok(payload.sources.some(s => s.sourcePath === 'Main.kt' && s.text.includes('city')));
+    assert.ok(payload.sources.some(s => s.sourcePath === 'Screen.kt'));
+    if (system.startsWith('Ты change_agent')) return reply('Festival.city используется в Screen.kt.');
+    return reply(JSON.stringify({ summary: 'Описано поле и отображение города', updates: [
+      { path: 'README.md', content: readme }, { path: 'docs/custom-guide.md', content: guide }
+    ] }));
+  };
+  const first = await runSyncDocs(config, mcp, base, { head, apply: true, fetchImpl: fake });
+  assert.equal(first.updates.length, 2);
+  assert.equal(await readFile(resolve(root, 'README.md'), 'utf8'), readme);
+  assert.equal(await readFile(resolve(root, 'docs/custom-guide.md'), 'utf8'), guide);
+  await git('add', 'README.md', 'docs/custom-guide.md');
+  await git('commit', '-m', 'document city');
+  searched = false;
+  const repeated = await runSyncDocs(config, mcp, base, { head, apply: true, fetchImpl: fake });
+  assert.equal(repeated.head, head);
+  assert.equal(repeated.patch, '');
+  assert.deepEqual(repeated.updates, []);
+  assert.equal(await git('status', '--porcelain'), '');
+});
+
+test('sync refuses incomplete source retrieval without saving files', async t => {
+  const { config, root, base, mcp } = await fixture(t);
+  await assert.rejects(runSyncDocs(config, mcp, base, { apply: true,
+    fetchImpl: async () => reply(JSON.stringify({ action: 'read', paths: ['.env'] }))
+  }), /Контекст исходников неполон/);
+  assert.equal(await readFile(resolve(root, 'docs/custom-guide.md'), 'utf8'), document);
 });
 
 test('documentation sync skips empty diff without any model calls', async t => {
