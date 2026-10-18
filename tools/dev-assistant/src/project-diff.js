@@ -14,7 +14,7 @@ export async function readProjectDiff(root, base, head = 'HEAD') {
   const headSha = (await git('rev-parse', '--verify', '--end-of-options', `${head}^{commit}`)).trim();
   const checkoutHead = (await git('rev-parse', 'HEAD')).trim();
   const diff = await git('diff', '--no-ext-diff', '--no-textconv', '--unified=5', baseSha, headSha, '--', ...paths);
-  if (diff.length > 60000) throw new Error('Diff превышает 60 000 символов. Выберите меньший диапазон коммитов.');
+  if (diff.length > 100000) throw new Error('Diff превышает 100 000 символов. Выберите меньший диапазон коммитов.');
   const files = (await git('diff', '--name-only', baseSha, headSha, '--', ...paths)).trim().split('\n').filter(Boolean);
   const dirtyDocs = (await git('status', '--porcelain', '--', 'README.md', 'docs/')).trim();
   return { base: baseSha, head: headSha, checkoutHead, files, diff, dirtyDocs: Boolean(dirtyDocs) };

@@ -8,6 +8,7 @@ import { execFile } from 'node:child_process';
 import { buildReviewContext, changedLines, reviewable } from '../src/review-context.js';
 import { reviewPullRequest, validateReview, renderReview, coalesceFindings, validatedReviewCall } from '../src/pr-review.js';
 import { publishReview } from '../src/review-github.js';
+import { readProjectDiff } from '../src/project-diff.js';
 const exec = promisify(execFile);
 const reply = data => new Response(JSON.stringify(data), { status: 200 });
 const modelReply = data => reply({ choices: [{ message: { content: JSON.stringify(data) } }] });
@@ -85,6 +86,20 @@ test('indexed sections do not duplicate lines or lose boundaries', async t => {
   assert.equal(sections[0].startLine, 1);
   for (let i = 1; i < sections.length; i++) assert.equal(sections[i].startLine, sections[i - 1].endLine + 1);
   assert.equal(sections.map(s => s.text).join('\n').trimEnd(), text.trimEnd());
+});
+
+test('review accepts a complete regression-tested feature below 100k and rejects larger diffs', async t => {
+  const { root, base, git, put } = await fixture(t);
+  await put('FeatureTest.kt', Array.from({ length: 1000 }, (_, i) => `// ${i} ${'x'.repeat(74)}`).join('\n') + '\n');
+  await git('add', 'FeatureTest.kt'); await git('commit', '-m', 'feature regression cases');
+  const accepted = await buildReviewContext(root, base, await git('rev-parse', 'HEAD'));
+  assert.ok(accepted.diff.length > 80000 && accepted.diff.length <= 100000);
+  const sync = await readProjectDiff(root, base);
+  assert.ok(sync.diff.length > 80000 && sync.diff.length <= 100000);
+  await put('Extra.kt', '// extra regression\n'.repeat(2000));
+  await git('add', 'Extra.kt'); await git('commit', '-m', 'too much diff');
+  await assert.rejects(buildReviewContext(root, base, await git('rev-parse', 'HEAD')), /Diff превышает 100 000/);
+  await assert.rejects(readProjectDiff(root, base), /Diff превышает 100 000/);
 });
 
 test('review selects code/docs through the agent, verifies the draft and formats three categories', async t => {

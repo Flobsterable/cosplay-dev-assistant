@@ -51,7 +51,7 @@ export async function buildReviewContext(root, baseRef, headRef) {
   if (files.length > 100) throw new Error('PR содержит более 100 файлов: разбейте его на меньшие изменения.');
   const eligible = files.filter(f => reviewable(f.path));
   const diff = eligible.length ? await git('diff', '--no-ext-diff', '--no-textconv', '--no-renames', '--unified=5', base, head, '--', ...eligible.map(f => f.path)) : '';
-  if (diff.length > 80000) throw new Error('Diff превышает 80 000 символов: разбейте PR. Проверка не выполнена.');
+  if (diff.length > 100000) throw new Error('Diff превышает 100 000 символов: разбейте PR. Проверка не выполнена.');
   const chunks = [], documents = [], omitted = files.filter(f => !reviewable(f.path)).map(f => ({ path: f.path, reason: 'неподдерживаемый или исключённый тип файла' }));
   let total = 0, projectRules = null;
   async function indexTree(ref, label, filter) {
