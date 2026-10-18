@@ -60,8 +60,8 @@ Markdown показывает оба итога и происхождение к
 ## Установка в целевой проект
 
 Шаблон: `examples/workflows/ai-review.yml`. Скопируйте в `.github/workflows/ai-review.yml`
-приложения и замените `REPLACE_WITH_REVIEW_RUNTIME_SHA` на SHA коммита ассистента,
-который содержит review-cli.js. Runtime закреплён по SHA, а не по изменяемой ветке PR.
+приложения. Runtime уже закреплён по SHA коммита ассистента с аудитом документации,
+а не по изменяемой ветке PR. При обновлении агента обновляйте ref в установленном workflow.
 
 В Settings → Secrets and variables → Actions репозитория приложения:
 
