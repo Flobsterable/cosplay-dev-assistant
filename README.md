@@ -76,8 +76,10 @@ npm start
 
 ## Обновление документации по diff
 
-/sync BASE сравнивает BASE..HEAD целевого проекта, запускает change_agent → docs_sync_agent
-и показывает unified diff. Команда /sync BASE --apply сохраняет изменения, если docs чистые
+/sync BASE сравнивает BASE..HEAD целевого проекта. Для фиксированного диапазона используйте
+`/sync BASE_SHA --head MERGED_SHA`. Агент через MCP получает каталог закоммиченных исходников,
+сам выбирает чтение и поиск определений/мест использования API, затем запускает
+change_agent → docs_sync_agent и показывает unified diff. Команда /sync BASE --apply сохраняет изменения, если docs чистые
 и репозиторий не изменился за время генерации. Запись ограничена существующими README.md и Markdown-файлами в docs/ целевого проекта.
 Docker по умолчанию монтирует приложение только для чтения; для явного сохранения:
 
@@ -87,9 +89,13 @@ sudo docker compose run --rm -v /home/user/projects/my-kmp-app:/project assistan
 ```
 
 Шаблон examples/workflows/docs-sync.yml можно установить в .github/workflows/ целевого
-проекта. Он создаёт draft PR с обновлением документации после изменений Kotlin/Gradle.
+проекта. Он создаёт draft PR с обновлением документации после слияния PR в main/develop.
+PR, закрытые без слияния, и ветки automation/docs-sync-* пропускаются. Для fork PR доступен
+ручной запуск с base/head SHA. Перед установкой замените REPLACE_WITH_DOCS_RUNTIME_SHA
+на SHA коммита ассистента с этой реализацией. Повтор диапазона обновляет ту же ветку предложения.
 Настройте LLM_API_KEY в GitHub Secrets, LLM_MODEL и при необходимости LLM_BASE_URL в Variables.
 Workflow сам клонирует этот репозиторий ассистента; в приложение его исходники копировать не нужно.
+Подробная настройка и воспроизводимый сценарий проверки: [docs sync](docs/docs-sync.md).
 
 ## Ограничения и актуальность
 
