@@ -166,7 +166,18 @@ export function renderReview(result, repository) {
   }
   if (result.documentationAudit) {
     const audit = result.documentationAudit;
-    lines.push('### Актуальность документации', '', escape(audit.summary), '', `Статус аудита: ${audit.status}.`, '');
+    const auditStatus = { checked: 'завершён', limit: 'не завершён', skipped: 'не выполнялся' }[audit.status] || audit.status;
+    lines.push('### Актуальность документации', '', escape(audit.summary), '', `Статус аудита: ${escape(auditStatus)}.`, '');
+    if (audit.retrieval) {
+      const r = audit.retrieval;
+      lines.push(`Прочитано разделов: ${r.readSections ?? audit.sources.length}; документов: ${r.readDocuments}. Использовано шагов: ${r.steps}/${r.maxSteps ?? 8}; символов контекста: ${r.characters}/${r.maxCharacters ?? 140000}.`, '');
+      if (r.deferredSections?.length) {
+        lines.push('Не поместились в контекст:', '');
+        for (const s of r.deferredSections.slice(0, 10)) lines.push(`- \x60${escape(s.path)}:${s.startLine}-${s.endLine}\x60 (${s.characters} символов)`);
+        if (r.deferredSections.length > 10) lines.push(`Ещё ${r.deferredSections.length - 10} разделов перечислены в review.json.`);
+        lines.push('');
+      }
+    }
     for (const f of audit.findings) {
       const sha = f.side === 'LEFT' ? context.base : context.head;
       const path = f.path.split('/').map(encodeURIComponent).join('/');
