@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { checkDocumentationLinks, validateDocsVerification } from '../src/docs-verifier.js';
+import { checkDocumentationLinks, validateDocsVerification, verifyDocumentation } from '../src/docs-verifier.js';
 import { auditDocumentation, validateDocsAudit } from '../src/docs-audit.js';
 import { buildReviewContext } from '../src/review-context.js';
 import { syncDocs } from '../src/sync-docs.js';
@@ -238,7 +238,10 @@ test('post-merge sync keeps large docs outside the code budget for generation an
     if (/^Ты агент поиска|^Ты независимый проверяющий/.test(system)) {
       assert.ok(payload.catalog.every(d => !d.path.endsWith('.md')));
       assert.ok(payload.readSections.some(s => s.sourcePath === 'Client.kt' && s.text.includes('timeoutMs')));
-      assert.ok(Object.values(payload.gitContext.documents).join('').length > 60000);
+      if (payload.gitContext.updates) {
+        assert.deepEqual(Object.keys(payload.gitContext.documents), ['docs/config.md']);
+        assert.ok(payload.remainingCharacters > 99000);
+      } else assert.ok(Object.values(payload.gitContext.documents).join('').length > 60000);
       if (/^Ты независимый/.test(system)) coveragePasses++;
       return response({ action: 'done' });
     }
@@ -291,6 +294,45 @@ test('documentation verifier requires an explicit verdict for every changed docu
   assert.throws(() => validateDocsVerification({ approved: true, reviewedPaths: ['README.md'], issues: [{ path: 'README.md', reason: 'Missing class' }] }, ['README.md']));
   assert.throws(() => validateDocsVerification({ approved: false, reviewedPaths: ['README.md'], issues: [] }, ['README.md']));
 });
+
+for (const rejectLast of [false, true]) {
+  test(`verification batches leave room for requested test evidence and ${rejectLast ? 'reject the last batch' : 'check every document'}`, async t => {
+    const { root, config, context } = await fixture(t);
+    const originals = { 'docs/untouched.md': '# Existing\n' + 'x'.repeat(49000) };
+    const updates = ['README.md', 'docs/config.md', 'docs/guide.md'].map(path => {
+      originals[path] = '# Before\n' + 'a'.repeat(6000);
+      return { path, content: '# After\n' + 'b'.repeat(9000) };
+    });
+    const template = context.index.chunks.find(s => s.path === 'head:Client.kt');
+    const index = { documents: ['head:Client.kt', 'head:src/desktopTest/Proof.kt'], chunks: [
+      { ...template, text: 'class Client\n' + ' '.repeat(65000) },
+      { ...template, path: 'head:src/desktopTest/Proof.kt', sourcePath: 'src/desktopTest/Proof.kt', text: 'class Proof\n' + ' '.repeat(15000) }
+    ] };
+    const reviewed = [];
+    const promise = verifyDocumentation(config, { root, originals, updates,
+      diff: 'diff --git a/Client.kt b/Client.kt\n--- a/Client.kt\n+++ b/Client.kt\n@@ -1 +1 @@\n-class Old\n+class Client\n', index,
+      fetchImpl: async (_url, init) => {
+        const { messages } = JSON.parse(init.body), system = messages[0].content, payload = JSON.parse(messages[1].content);
+        if (/^Ты агент поиска|^Ты независимый проверяющий/.test(system)) {
+          assert.ok(!Object.hasOwn(payload.gitContext.documents, 'docs/untouched.md'));
+          const proseSize = Object.values(payload.gitContext.documents).join('').length + payload.gitContext.updates.map(u => u.content).join('').length;
+          assert.ok(proseSize + payload.remainingCharacters + payload.readSections.reduce((n, s) => n + s.text.length, 0) <= 140000);
+          return response(payload.readSections.some(s => s.sourcePath.endsWith('Proof.kt')) ? { action: 'done' } : { action: 'read', paths: ['head:src/desktopTest/Proof.kt'] });
+        }
+        assert.ok(payload.sources.some(s => s.sourcePath.endsWith('Proof.kt')));
+        const paths = payload.updates.map(u => u.path); reviewed.push(...paths);
+        const rejected = rejectLast && paths.includes('docs/guide.md');
+        return response({ approved: !rejected, reviewedPaths: paths, issues: rejected ? [{ path: 'docs/guide.md', reason: 'Unconfirmed assertion' }] : [] });
+      } });
+    if (rejectLast) await assert.rejects(promise, /Unconfirmed assertion/);
+    else {
+      const result = await promise;
+      assert.equal(result.retrieval.batches.length, 2);
+      assert.ok(result.retrieval.batches.every(r => r.status === 'checked' && r.characters > 80000));
+    }
+    assert.deepEqual(reviewed, updates.map(u => u.path));
+  });
+}
 
 test('links validate heading anchors against proposed docs and catch breakage in untouched documents', async t => {
   const { root } = await fixture(t);
