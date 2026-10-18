@@ -82,6 +82,21 @@ test('PR audit sees documentation updated in the same PR even when retrieval did
   assert.equal(audit.status, 'checked'); assert.deepEqual(audit.findings, []);
 });
 
+test('audit repairs malformed JSON structure while retaining a confirmed documentation finding', async t => {
+  const { config, context } = await fixture(t);
+  let calls = 0;
+  const audit = await auditDocumentation(config, context, { fetchImpl: async (_url, init) => {
+    const { messages } = JSON.parse(init.body), system = messages[0].content, payload = JSON.parse(messages[1].content);
+    const found = retrieval(system, payload); if (found) return found;
+    if (++calls === 1) return response({ summary: 123, findings: {} });
+    const code = payload.sources.find(s => s.path === 'head:Client.kt');
+    const doc = payload.sources.find(s => s.path === 'head:docs/config.md');
+    return response({ summary: 'Timeout missing in docs.', findings: [{ path: 'Client.kt', side: 'RIGHT', line: 1,
+      document: 'docs/config.md', title: 'Document timeout', body: 'timeoutMs defaults to 5000.', sources: [code.id, doc.id] }] });
+  } });
+  assert.equal(calls, 3); assert.equal(audit.status, 'checked'); assert.equal(audit.findings.length, 1);
+});
+
 test('audit does not report a clean result when source retrieval is incomplete', async t => {
   const { config, context } = await fixture(t);
   const audit = await auditDocumentation(config, context, { fetchImpl: async () => response({ action: 'read', paths: ['unknown.kt'] }) });
