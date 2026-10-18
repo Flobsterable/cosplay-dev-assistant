@@ -5,7 +5,7 @@ import { complete, prepareQuestion } from './assistant.js';
 import { discoverEditableDocs } from './doc-paths.js';
 import { collectIndexedContext } from './document-agent.js';
 import { verifyDocumentation } from './docs-verifier.js';
-import { sourceIndexForDocs, changedSourceSections } from './docs-context.js';
+import { sourceIndexForDocs, changedSourceSections, documentationSourceBudget } from './docs-context.js';
 
 export function validateUpdates(value, editableDocs = []) {
   if (!value || typeof value.summary !== 'string' || !Array.isArray(value.updates) || value.updates.length > editableDocs.length) throw new Error('Некорректный ответ агента документации.');
@@ -46,7 +46,7 @@ export async function syncDocs(config, mcp, base, { apply = false, head = 'HEAD'
   const context = await collectIndexedContext(sourceIndex, config,
     `Обнови документацию по diff. Текущие README/docs уже полностью переданы в gitContext.documents; повторно читать их через каталог не нужно. Изменённые участки кода предварительно прочитаны. Найди только недостающие определения изменённых API/компонентов и места использования. Проверь фактическое поведение по исходникам.\n${changes.diff}`, {
       fetchImpl, onEvent: event => emit(event.agent, event.status, event.detail),
-      maxCharacters: 60000, initialSectionIds: changedSourceSections(sourceIndex, changes.diff),
+      maxCharacters: documentationSourceBudget(originals), initialSectionIds: changedSourceSections(sourceIndex, changes.diff),
       gitContext: { base: changes.base, head: changes.head, documents: originals }
     });
   const truncated = corpus.omitted.filter(file => /лимит/.test(file.reason));

@@ -13,8 +13,17 @@ import { connectProject } from '../src/mcp-client.js';
 import { renderReview } from '../src/pr-review.js';
 import { collectIndexedContext } from '../src/document-agent.js';
 import { createServer } from 'node:http';
+import { documentationSourceBudget } from '../src/docs-context.js';
 
 const exec = promisify(execFile);
+test('docs sync lends unused document capacity to source retrieval within the combined ceiling', () => {
+  for (const size of [0, 40000, 67000, 80000]) {
+    const budget = documentationSourceBudget({ 'docs/guide.md': 'x'.repeat(size) });
+    assert.ok(budget >= 60000 && budget <= 100000);
+    assert.ok(budget + size <= 140000);
+  }
+  assert.equal(documentationSourceBudget({ guide: 'x'.repeat(67000) }), 73000);
+});
 const response = value => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(value) } }] }));
 async function fixture(t, documented = false) {
   const root = await mkdtemp(resolve(tmpdir(), 'docs-validation-'));

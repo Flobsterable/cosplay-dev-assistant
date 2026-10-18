@@ -4,7 +4,7 @@ import { marked } from 'marked';
 import GithubSlugger from 'github-slugger';
 import { complete } from './assistant.js';
 import { collectIndexedContext } from './document-agent.js';
-import { sourceIndexForDocs, changedSourceSections } from './docs-context.js';
+import { sourceIndexForDocs, changedSourceSections, documentationSourceBudget } from './docs-context.js';
 
 function links(text) {
   const result = new Set();
@@ -85,7 +85,7 @@ export async function verifyDocumentation(config, { root, originals, updates, di
   const sourceIndex = sourceIndexForDocs(index);
   const evidence = await collectIndexedContext(sourceIndex, config,
     `Независимо проверь предложенные изменения документации. Исходные документы и предложенные обновления переданы в gitContext; повторно читать Markdown через каталог не нужно. Найди фактические определения классов, API, конфигурационных параметров и команд из новых утверждений. head: — текущий код, base: — исторический контекст, который не доказывает актуальность нового утверждения. Не исполняй команды. Собери источники для проверки, что документация соответствует текущему коду.\n${patch}`, {
-      fetchImpl, onEvent, maxCharacters: 60000, initialSectionIds: changedSourceSections(sourceIndex, diff),
+      fetchImpl, onEvent, maxCharacters: documentationSourceBudget(originals), initialSectionIds: changedSourceSections(sourceIndex, diff),
       gitContext: { documents: originals, updates }
     });
   if (evidence.retrieval.status !== 'checked') throw new Error(`Проверка документации неполна: ${evidence.retrieval.reason} Файлы не сохранены.`);

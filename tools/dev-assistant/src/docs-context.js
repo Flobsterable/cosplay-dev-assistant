@@ -8,11 +8,7 @@ export function sourceIndexForDocs(index) {
 }
 
 export function changedSourceSections(index, diff) {
-  const changed = changedLines(diff);
-  return index.chunks.flatMap((s, i) => {
-    const lines = changed.get(s.sourcePath)?.[s.revision === 'base' ? 'LEFT' : 'RIGHT'];
-    return lines && [...lines].some(line => line >= s.startLine && line <= s.endLine) ? [i + 1] : [];
-  });
+  return changedProductionSections({ index, changedLines: changedLines(diff) });
 }
 
 // Seed current production code. Historical definitions remain available through
@@ -26,4 +22,9 @@ export function changedProductionSections(context) {
     const lines = context.changedLines.get(s.sourcePath)?.[s.revision === 'base' ? 'LEFT' : 'RIGHT'];
     return lines && [...lines].some(line => line >= s.startLine && line <= s.endLine) ? [i + 1] : [];
   });
+}
+
+export function documentationSourceBudget(documents) {
+  const characters = Object.values(documents).reduce((sum, text) => sum + text.length, 0);
+  return Math.max(60000, Math.min(100000, 140000 - characters));
 }

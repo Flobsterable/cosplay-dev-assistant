@@ -75,6 +75,18 @@ test('review rejects invented paths, unchanged lines and unsupported source IDs'
   assert.equal(validateReview({ summary: 'x', findings: [finding] }, context, [{}]).findings.length, 1);
 });
 
+test('indexed sections do not duplicate lines or lose boundaries', async t => {
+  const { root, base, git, put } = await fixture(t);
+  const text = Array.from({ length: 181 }, (_, i) => `// unique line ${i + 1}`).join('\n') + '\n';
+  await put('Long.kt', text);
+  await git('add', 'Long.kt'); await git('commit', '-m', 'long source');
+  const context = await buildReviewContext(root, base, await git('rev-parse', 'HEAD'));
+  const sections = context.index.chunks.filter(s => s.path === 'head:Long.kt');
+  assert.equal(sections[0].startLine, 1);
+  for (let i = 1; i < sections.length; i++) assert.equal(sections[i].startLine, sections[i - 1].endLine + 1);
+  assert.equal(sections.map(s => s.text).join('\n').trimEnd(), text.trimEnd());
+});
+
 test('review selects code/docs through the agent, verifies the draft and formats three categories', async t => {
   const { config, base, head } = await fixture(t);
   let reviewers = 0;

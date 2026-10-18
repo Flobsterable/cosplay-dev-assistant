@@ -70,7 +70,7 @@ export async function buildReviewContext(root, baseRef, headRef) {
       documents.push(catalogPath);
       const lines = text.split(/\r?\n/);
       for (let start = 0; start < lines.length; start += 60) {
-        const end = Math.min(start + 70, lines.length), body = lines.slice(start, end).join('\n');
+        const end = Math.min(start + 60, lines.length), body = lines.slice(start, end).join('\n');
         if (!body.trim()) continue;
         const heading = lines.slice(start, end).filter(l => /^(?:#{1,6}\s|\s*(?:public |private |internal |suspend |data |sealed |@Composable)*\b(?:fun|class|interface|object)\b)/.test(l)).join(' ').slice(0, 300) || path;
         chunks.push({ path: catalogPath, sourcePath: path, revision: label, heading, startLine: start + 1, endLine: end, text: body, tokens: tokenize(path + ' ' + heading + ' ' + body) });
