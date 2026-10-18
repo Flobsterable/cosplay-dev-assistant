@@ -56,9 +56,9 @@ export async function syncDocs(config, mcp, base, { apply = false, head = 'HEAD'
   evidence.codeContext = context;
   emit('change_agent', 'running', `${changes.base.slice(0, 8)}..${changes.head.slice(0, 8)}: ${changes.files.length} файлов`);
   const analysis = await complete(config, [
-    { role: 'system', content: `Ты change_agent. ${policy} Проанализируй diff: изменения API, моделей, архитектуры, запуска или релиза. Для каждого вывода укажи путь и изменение, на котором он основан. Отдельно укажи изменения, не требующие документации. Не обновляй документы сам.` },
+    { role: 'system', content: `Ты change_agent. ${policy} Кратко проанализируй diff: изменения поведения, API, моделей, архитектуры, запуска или релиза. Объединяй связанные изменения в один вывод; не пересказывай код построчно. Для каждого вывода укажи путь и изменение, на котором он основан. Отдельно укажи изменения, не требующие документации. Не обновляй документы сам.` },
     { role: 'user', content: JSON.stringify({ ...changes, sources: context.sources }) }
-  ], fetchImpl);
+  ], fetchImpl, false, 8000);
   emit('change_agent', 'done', 'Анализ передан docs_sync_agent');
   emit('docs_sync_agent', 'running', 'Подготовка новых версий затронутых Markdown-файлов');
   async function generate(documents) {

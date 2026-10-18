@@ -206,7 +206,10 @@ test('truncated multi-document generation falls back to single files and verifie
   const result = await syncDocs(config, mcp, base, { apply: true, fetchImpl: async (_url, init) => {
     const { messages } = JSON.parse(init.body), system = messages[0].content, payload = JSON.parse(messages[1].content);
     const found = retrieval(system, payload); if (found) return found;
-    if (system.startsWith('Ты change_agent')) return new Response(JSON.stringify({ choices: [{ message: { content: 'Client.timeoutMs added.' } }] }));
+    if (system.startsWith('Ты change_agent')) {
+      assert.equal(JSON.parse(init.body).max_tokens, 8000);
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'Client.timeoutMs added.' } }] }));
+    }
     if (system.startsWith('Ты docs_sync_agent')) {
       if (++writerCalls === 1) return new Response(JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: '{"updates":[' } }] }));
       assert.equal(Object.keys(payload.documents).length, 1);
