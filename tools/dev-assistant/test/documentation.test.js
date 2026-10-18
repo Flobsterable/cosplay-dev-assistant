@@ -122,6 +122,24 @@ test('incomplete retrieval names deferred sections and distinguishes character a
   assert.doesNotMatch(report, /Статус аудита: limit|Подтверждённых расхождений документации не найдено/);
 });
 
+test('re-reading preloaded sections switches to independent coverage without marking them checked automatically', async () => {
+  const index = { documents: ['head:API.kt'], chunks: [{ path: 'head:API.kt', sourcePath: 'API.kt', revision: 'head', startLine: 1, endLine: 1, text: 'fun api() = Unit', heading: 'API' }] };
+  const config = { apiKey: 'test', model: 'test', baseUrl: 'https://example.invalid' };
+  let calls = 0;
+  const result = await collectIndexedContext(index, config, 'Check API', { initialSectionIds: [1], fetchImpl: async (_url, init) => {
+    const { messages } = JSON.parse(init.body), payload = JSON.parse(messages[1].content);
+    assert.equal(payload.catalog[0].sections[0].read, true);
+    if (++calls === 1) return response({ action: 'read', paths: ['head:API.kt'] });
+    assert.match(messages[0].content, /^Ты независимый проверяющий/);
+    return response({ action: 'done', reason: 'Existing source is sufficient.' });
+  } });
+  assert.equal(result.retrieval.status, 'checked'); assert.equal(calls, 2);
+  assert.equal(result.retrieval.noProgressRequests, 1);
+  const incomplete = await collectIndexedContext(index, config, 'Check API', { initialSectionIds: [1], maxSteps: 2, fetchImpl: async () => response({ action: 'read', paths: ['head:API.kt'] }) });
+  assert.equal(incomplete.retrieval.status, 'limit');
+  assert.equal(incomplete.retrieval.noProgressRequests, 2);
+});
+
 test('CLI saves an incomplete audit report but exits nonzero', async t => {
   const { root, base, head } = await fixture(t);
   const server = createServer(async (req, res) => {
