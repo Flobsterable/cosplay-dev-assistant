@@ -70,9 +70,21 @@ ${context.diff}`;
 Верни JSON {"summary":"краткий итог","findings":[{"category":"bug|architecture|recommendation","priority":"P1|P2|P3","path":"путь без head:/base:","side":"RIGHT|LEFT","line":1,"title":"проблема","body":"сценарий, риск, исправление","sources":[1],"rules":[{"layer":"base|project","id":"ID из действующих правил"}]}]}.
 Замечания должны относиться к введённым/усугублённым PR проблемам, подтверждаться контекстом и привязываться к anchor изменённой строки. Не заполняй категории искусственно. Не утверждай, что тесты выполнены или PR одобрен.`;
   const input = { base: context.base, head: context.head, files: context.files, diff: context.diff, anchors, documentation, retrieval: evidence.retrieval, omitted: context.omitted };
-  async function reviewCall(messages) {
+  async function reviewCall(messages, validate = value => value) {
+    let repair = null;
     for (let attempt = 0; attempt < 2; attempt++) {
-      try { return JSON.parse(await complete(config, messages, fetchImpl, true, 7000)); }
+      try {
+        const raw = await complete(config, repair ? [...messages,
+          { role: 'assistant', content: repair.raw },
+          { role: 'user', content: `Предыдущий ответ отклонён валидатором: ${repair.error}. Исправь JSON по исходным anchors, источникам и правилам. Не выдумывай пути, строки или source IDs; удали неподтверждённые замечания. Верни полный исправленный ответ в прежнем формате.` }
+        ] : messages, fetchImpl, true, 7000);
+        try { return validate(JSON.parse(raw)); }
+        catch (error) {
+          if (attempt) throw error;
+          repair = { raw, error: error.message };
+          onEvent({ agent: 'review_orchestrator', status: 'retry', detail: 'Ответ модели отклонён: запрашиваю исправление структуры, источников или привязки к diff' });
+        }
+      }
       catch (error) {
         if (attempt || !(error instanceof SyntaxError || error instanceof TypeError || error.name === 'TimeoutError' || /HTTP (429|5\d\d)/.test(error.message))) throw error;
         onEvent({ agent: 'review_orchestrator', status: 'retry', detail: 'Повторяю вызов модели после временной сетевой/API ошибки' });
@@ -86,9 +98,12 @@ ${context.diff}`;
 Это независимый проход ${layer}. Проверяй только следующие правила; findings.rules должны содержать только layer=${layer}.
 ${rules}` },
       { role: 'user', content: JSON.stringify(input) }
-    ]);
-    const result = validateReview(raw, context, sources);
-    if (result.findings.some(f => f.rules.some(r => r.layer !== layer))) throw new Error('Ревьюер использовал правила другого слоя.');
+    ], value => {
+      const result = validateReview(value, context, sources);
+      if (result.findings.some(f => f.rules.some(r => r.layer !== layer))) throw new Error('Ревьюер использовал правила другого слоя.');
+      return result;
+    });
+    const result = raw;
     onEvent({ agent: layer + '_reviewer', status: 'done', detail: `Замечаний: ${result.findings.length}` });
     return result;
   }
@@ -109,9 +124,12 @@ ${profile}
 ${context.projectRules?.text || 'отсутствуют'}
 Проверь два независимых черновика. Удали ложные/старые/субъективные замечания. Объедини одинаковые проблемы и последствия одной причины, сохранив rules обоих слоёв. Если расхождение документации лишь следствие уже описанной ошибочной регрессии и устраняется исправлением этого бага, не создавай отдельное замечание и не предлагай документировать баг как правильное поведение. При этом не смешивай разные независимые проблемы лишь потому, что они на одной строке. Не добавляй новые проблемы.` },
     { role: 'user', content: JSON.stringify({ ...input, draft }) }
-  ]);
-  const review = validateReview(verified, context, sources);
-  for (const f of review.findings) if (!draft.findings.some(d => d.path === f.path && d.side === f.side && d.line === f.line)) throw new Error('Проверяющий добавил новое замечание вне черновиков.');
+  ], value => {
+    const review = validateReview(value, context, sources);
+    for (const f of review.findings) if (!draft.findings.some(d => d.path === f.path && d.side === f.side && d.line === f.line)) throw new Error('Проверяющий добавил новое замечание вне черновиков.');
+    return review;
+  });
+  const review = verified;
   // A changed location appears once; retain all verified explanations and rule IDs.
   review.findings = coalesceFindings(review.findings);
   const documentationAudit = await auditDocumentation(config, context, { codeFindings: review.findings, fetchImpl, onEvent });

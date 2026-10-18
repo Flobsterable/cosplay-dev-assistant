@@ -128,6 +128,34 @@ test('publication updates only the bot marker and skips a head that changed befo
   assert.equal(stale.published, false);
 });
 
+for (const repairable of [true, false]) {
+  test(`review ${repairable ? 'repairs' : 'rejects'} an invalid model anchor without bypassing validation`, async t => {
+    const { config, base, head } = await fixture(t);
+    let baseCalls = 0;
+    const fetchImpl = async (_url, init) => {
+      const { messages } = JSON.parse(init.body), payload = JSON.parse(messages[1].content), system = messages[0].content;
+      if (/^Ты агент поиска|^Ты независимый проверяющий/.test(system)) return modelReply(payload.readSections.length
+        ? { action: 'done' } : { action: 'read', paths: ['head:LoadingBlock.kt', 'head:Caller.kt'] });
+      if (system.startsWith('Ты docs_auditor')) return modelReply({ summary: 'No documentation changes needed.', findings: [] });
+      if (payload.draft) return modelReply(payload.draft);
+      if (system.includes('проход project')) return modelReply({ summary: 'No project findings.', findings: [] });
+      baseCalls++;
+      if (baseCalls === 2) {
+        assert.match(messages.at(-1).content, /отклонён валидатором/);
+        assert.equal(messages.at(-2).role, 'assistant');
+      }
+      return modelReply({ summary: 'Division regression', findings: [{ category: 'bug', priority: 'P1', path: 'LoadingBlock.kt', side: 'RIGHT',
+        line: repairable && baseCalls === 2 ? 1 : 999, title: 'Zero divisor', body: 'divide(2) now divides by zero.',
+        sources: [payload.documentation.find(s => s.path === 'head:LoadingBlock.kt').id], rules: [{ layer: 'base', id: 'B-CORRECTNESS' }] }] });
+    };
+    if (repairable) {
+      const result = await reviewPullRequest(config, { base, head, fetchImpl });
+      assert.equal(result.review.findings.length, 1); assert.equal(result.review.findings[0].line, 1);
+    } else await assert.rejects(reviewPullRequest(config, { base, head, fetchImpl }), /изменённой строке/);
+    assert.equal(baseCalls, 2);
+  });
+}
+
 test('new commits keep previous reports; rerunning the same commit updates only its own report', async () => {
   const shaA = 'a'.repeat(40), shaB = 'b'.repeat(40);
   let current = shaA;
