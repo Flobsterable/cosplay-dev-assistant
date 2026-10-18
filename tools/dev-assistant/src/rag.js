@@ -25,8 +25,7 @@ export async function buildIndex(projectRoot) {
       for (const name of (await readdir(file)).sort()) {
         if (!name.startsWith('.')) await visit(resolve(file, name));
       }
-    } else if (/\.md$/i.test(file) && stat.size <= 1024 * 1024) {
-      if (documents.length >= 300) throw new Error('Слишком много документов: лимит 300 Markdown-файлов.');
+    } else if (/\.md$/i.test(file)) {
       const text = await readFile(file, 'utf8');
       documents.push({ path: relative(root, file).split(sep).join('/'), text });
     }

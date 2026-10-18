@@ -5,7 +5,7 @@ import GithubSlugger from 'github-slugger';
 import { createTwoFilesPatch } from 'diff';
 import { complete } from './assistant.js';
 import { collectIndexedContext } from './document-agent.js';
-import { sourceIndexForDocs, changedSourceSections, documentationSourceBudget } from './docs-context.js';
+import { sourceIndexForDocs, changedSourceSections, docsRetrievalOptions } from './docs-context.js';
 
 function links(text) {
   const result = new Set();
@@ -83,20 +83,13 @@ export async function verifyDocumentation(config, { root, originals, updates, di
   const links = await checkDocumentationLinks(root, originals, updates);
   if (links.issues.length) throw new Error(`Проверка ссылок отклонила документацию: ${links.issues.map(i => `${i.path}: ${i.href} — ${i.reason}`).join('; ')}`);
   // Check links against the complete overlay, but verify factual assertions in
-  // bounded batches. Unchanged manuals must not crowd out requested test/code
-  // evidence; include both old and proposed prose in each batch's budget.
+  // individual documents. Each receives fresh source retrieval without a fixed
+  // character ceiling; unchanged approved prose can reuse its explicit verdict.
   const batches = [];
-  let batch = [], characters = 0;
   const key = update => JSON.stringify([originals[update.path], update.content]);
   for (const update of updates.filter(u => approvals.get(u.path)?.key !== key(u))) {
-    const size = (originals[update.path] || '').length + update.content.length;
-    if (size > 80000) throw new Error(`Документ ${update.path} слишком велик для независимой проверки. Файлы не сохранены.`);
-    if (batch.length && characters + size > 40000) {
-      batches.push(batch); batch = []; characters = 0;
-    }
-    batch.push(update); characters += size;
+    batches.push([update]);
   }
-  if (batch.length) batches.push(batch);
   const issues = [];
   for (const updates of batches) {
     const documents = Object.fromEntries(updates.map(u => [u.path, originals[u.path] || '']));
@@ -131,8 +124,7 @@ async function verifyBatch(config, { originals, updates, diff, patch, index, fet
   const sourceIndex = sourceIndexForDocs(index);
   const evidence = await collectIndexedContext(sourceIndex, config,
     `Независимо проверь предложенные изменения документации. Исходные документы и предложенные обновления переданы в gitContext; повторно читать Markdown через каталог не нужно. Найди фактические определения классов, API, конфигурационных параметров и команд из новых утверждений. head: — текущий код, base: — исторический контекст, который не доказывает актуальность нового утверждения. Не исполняй команды. Собери источники для проверки, что документация соответствует текущему коду.\n${patch}`, {
-      fetchImpl, onEvent, maxCharacters: documentationSourceBudget({ ...originals,
-        ...Object.fromEntries(updates.map(u => [`proposed:${u.path}`, u.content])) }), initialSectionIds: changedSourceSections(sourceIndex, diff),
+      fetchImpl, onEvent, ...docsRetrievalOptions(sourceIndex), initialSectionIds: changedSourceSections(sourceIndex, diff),
       gitContext: { documents: originals, updates }
     });
   if (evidence.retrieval.status !== 'checked') throw new Error(`Проверка документации неполна: ${evidence.retrieval.reason} Файлы не сохранены.`);

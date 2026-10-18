@@ -99,7 +99,9 @@ test('review accepts a complete regression-tested feature below 100k and rejects
   await put('Extra.kt', '// extra regression\n'.repeat(2000));
   await git('add', 'Extra.kt'); await git('commit', '-m', 'too much diff');
   await assert.rejects(buildReviewContext(root, base, await git('rev-parse', 'HEAD')), /Diff превышает 100 000/);
-  await assert.rejects(readProjectDiff(root, base), /Diff превышает 100 000/);
+  assert.ok((await readProjectDiff(root, base)).diff.length > 100000);
+  const docsContext = await buildReviewContext(root, base, await git('rev-parse', 'HEAD'), { documentationSync: true });
+  assert.ok(docsContext.diff.length > 100000);
 });
 
 test('review selects code/docs through the agent, verifies the draft and formats three categories', async t => {

@@ -1,6 +1,6 @@
 import { changedLines } from './review-context.js';
 
-// README/docs already have a separate bounded slot in the sync/verifier payload.
+// README/docs already have a separate slot in the sync/verifier payload.
 // Do not make their repeated retrieval consume the source-code budget as well.
 export function sourceIndexForDocs(index) {
   const chunks = index.chunks.filter(s => !/\.md$/i.test(s.sourcePath));
@@ -24,7 +24,12 @@ export function changedProductionSections(context) {
   });
 }
 
-export function documentationSourceBudget(documents) {
-  const characters = Object.values(documents).reduce((sum, text) => sum + text.length, 0);
-  return Math.max(60000, Math.min(100000, 140000 - characters));
+// The corpus itself bounds reads; no requested section is deferred for its size.
+// Scale the loop guard with the corpus, retaining protection against stuck models.
+export function docsRetrievalOptions(index) {
+  return {
+    maxCharacters: index.chunks.reduce((sum, section) => sum + section.text.length, 0),
+    maxSteps: Math.max(16, index.chunks.length * 2 + 4),
+    maxCatalogCharacters: Infinity
+  };
 }
