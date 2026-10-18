@@ -1,48 +1,71 @@
 name: Update documentation with AI
 
 on:
-  push:
+  pull_request:
+    types: [closed]
     branches: [develop, main]
-    paths:
-      - '**/*.kt'
-      - '**/*.kts'
-      - '**/*.toml'
-      - 'gradle.properties'
-      - '.github/workflows/release.yml'
   workflow_dispatch:
     inputs:
       base:
-        description: 'Base commit or ref for comparison with HEAD'
+        description: 'Original PR base SHA (copy from the first run log)'
         required: true
-        default: 'HEAD~1'
+      head:
+        description: 'Merged PR SHA (copy from the first run log)'
+        required: true
 
 permissions:
   contents: write
   pull-requests: write
 
 concurrency:
-  group: docs-sync-${{ github.ref }}
+  group: docs-sync-${{ github.event.pull_request.base.ref || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   docs-sync:
+    # Fork PRs do not receive secrets/write tokens with pull_request.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       !startsWith(github.event.pull_request.head.ref, 'automation/docs-sync-'))
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout current target documentation
+        uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.base.ref || github.ref_name }}
           fetch-depth: 0
-      - uses: actions/checkout@v4
+      - name: Checkout assistant runtime
+        uses: actions/checkout@v4
         with:
           repository: Flobsterable/cosplay-dev-assistant
+          ref: b8a24ccabc398f9c2d6ba6e9774b2831ecd4ef1e
           path: .assistant-runtime
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
           cache: npm
           cache-dependency-path: .assistant-runtime/tools/dev-assistant/package-lock.json
-      - run: npm ci
+      - run: npm ci --ignore-scripts
         working-directory: .assistant-runtime/tools/dev-assistant
+      - name: Resolve immutable source range
+        id: range
+        env:
+          BASE_REF: ${{ inputs.base || github.event.pull_request.base.sha }}
+          HEAD_REF: ${{ inputs.head || github.event.pull_request.merge_commit_sha }}
+        shell: bash
+        run: |
+          [[ "$BASE_REF" =~ ^[0-9a-f]{40}$ ]] && [[ "$HEAD_REF" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          git cat-file -e "$BASE_REF^{commit}"
+          git cat-file -e "$HEAD_REF^{commit}"
+          git merge-base --is-ancestor "$BASE_REF" "$HEAD_REF"
+          git merge-base --is-ancestor "$HEAD_REF" HEAD
+          echo "base=$BASE_REF" >> "$GITHUB_OUTPUT"
+          echo "head=$HEAD_REF" >> "$GITHUB_OUTPUT"
+          echo "Repeat: /sync $BASE_REF --head $HEAD_REF"
       - name: Generate documentation changes
         working-directory: .assistant-runtime/tools/dev-assistant
         env:
@@ -50,23 +73,31 @@ jobs:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
-          BASE_REF: ${{ github.event.inputs.base || github.event.before }}
+          BASE_REF: ${{ steps.range.outputs.base }}
+          HEAD_REF: ${{ steps.range.outputs.head }}
         run: |
-          if [ "$BASE_REF" = "0000000000000000000000000000000000000000" ]; then
-            echo 'New branch has no previous commit; use workflow_dispatch with an explicit base.'
-            exit 0
-          fi
-          node src/cli.js /sync "$BASE_REF" --apply
-      - name: Open documentation PR
+          set -o pipefail
+          node src/cli.js /sync "$BASE_REF" --head "$HEAD_REF" --apply | tee "$RUNNER_TEMP/docs-sync.txt"
+      - name: Save diff and agent trace
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-sync-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/docs-sync.txt
+          if-no-files-found: ignore
+      - name: Open or update documentation PR
         uses: peter-evans/create-pull-request@v8
         with:
-          branch: automation/docs-sync-${{ github.sha }}
+          base: ${{ github.event.pull_request.base.ref || github.ref_name }}
+          branch: automation/docs-sync-${{ steps.range.outputs.head }}
           add-paths: |
             README.md
             docs/**/*.md
-          commit-message: 'docs: update documentation from code changes'
+          commit-message: 'docs: update documentation from merged code'
           title: 'docs: align documentation with merged code'
           body: |
-            The documentation agent analysed committed Kotlin, Gradle and release workflow changes.
-            This PR updates only project documentation. Please check the diff against the merged code.
+            Documentation generated from ${{ steps.range.outputs.base }}..${{ steps.range.outputs.head }}.
+            The agent searched committed sources and their usages, read project docs, and saved documentation changes.
+            Re-run this range using workflow_dispatch with the same base/head SHA to update this PR.
+            Please check the documentation diff against the code before merging.
           draft: true

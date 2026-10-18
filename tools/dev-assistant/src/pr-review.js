@@ -3,6 +3,7 @@ import { complete } from './assistant.js';
 import { collectIndexedContext } from './document-agent.js';
 import { buildReviewContext } from './review-context.js';
 import { reviewHeadMarker } from './review-github.js';
+import { auditDocumentation } from './docs-audit.js';
 
 export function ruleIds(text, prefix) { return new Set([...text.matchAll(/^##\s+([BP]-[A-Z0-9_-]+)\b/gm)].map(m => m[1]).filter(id => id.startsWith(prefix + '-'))); }
 
@@ -113,9 +114,10 @@ ${context.projectRules?.text || 'отсутствуют'}
   for (const f of review.findings) if (!draft.findings.some(d => d.path === f.path && d.side === f.side && d.line === f.line)) throw new Error('Проверяющий добавил новое замечание вне черновиков.');
   // A changed location appears once; retain all verified explanations and rule IDs.
   review.findings = coalesceFindings(review.findings);
+  const documentationAudit = await auditDocumentation(config, context, { codeFindings: review.findings, fetchImpl, onEvent });
   // Report only verified outcomes; draft summaries may mention rejected findings.
   const count = layer => review.findings.filter(f => f.rules.some(r => r.layer === layer)).length;
-  return { context, sources, retrieval: evidence.retrieval, layers: { ...layerInfo,
+  return { context, sources, documentationAudit, retrieval: evidence.retrieval, layers: { ...layerInfo,
     baseSummary: `Общие правила агента; итоговых замечаний в проверенном контексте: ${count('base')}.`,
     projectSummary: context.projectRules ? `Действующие правила проекта; итоговых замечаний в проверенном контексте: ${count('project')}.` : projectReview.summary }, review };
 }
@@ -140,6 +142,19 @@ export function renderReview(result, repository) {
       const path = f.path.split('/').map(encodeURIComponent).join('/');
       lines.push(`- **[${f.priority}] ${escape(f.title)}** — [${escape(f.path)}:${f.line}](https://github.com/${repository}/blob/${sha}/${path}#L${f.line})`, `  ${escape(f.body)} Правила: ${f.rules.map(r => (r.layer === 'base' ? 'база/' : 'проект/') + r.id).join(', ')}. Источники: ${f.sources.map(i => `[${i}]`).join(', ')}.`, '');
     }
+  }
+  if (result.documentationAudit) {
+    const audit = result.documentationAudit;
+    lines.push('### Актуальность документации', '', escape(audit.summary), '', `Статус аудита: ${audit.status}.`, '');
+    for (const f of audit.findings) {
+      const sha = f.side === 'LEFT' ? context.base : context.head;
+      const path = f.path.split('/').map(encodeURIComponent).join('/');
+      lines.push(`- **${escape(f.title)}** — [${escape(f.path)}:${f.line}](https://github.com/${repository}/blob/${sha}/${path}#L${f.line})`,
+        `  ${escape(f.body)} Документ: ${f.document ? '\x60' + escape(f.document) + '\x60' : 'README/docs отсутствуют'}. Источники аудита: ${f.sources.map(id => `[D${id}]`).join(', ')}.`, '');
+    }
+    if (audit.status === 'checked' && !audit.findings.length) lines.push('Подтверждённых расхождений документации не найдено.', '');
+    for (const [i, s] of audit.sources.entries()) lines.push(`[D${i + 1}] \x60${s.path}:${s.startLine}-${s.endLine}\x60`);
+    lines.push('');
   }
   lines.push('### Контекст', '', `Изменено файлов: ${context.files.length}. Прочитано разделов: ${sources.length}. Проверка покрытия: ${retrieval.status === 'checked' ? 'выполнена' : 'не завершена'}.`, '');
   for (const [i,s] of sources.entries()) lines.push(`[${i + 1}] \`${s.path}:${s.startLine}-${s.endLine}\``);

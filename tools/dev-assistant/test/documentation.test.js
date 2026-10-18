@@ -1,0 +1,159 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { resolve } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { checkDocumentationLinks, validateDocsVerification } from '../src/docs-verifier.js';
+import { auditDocumentation, validateDocsAudit } from '../src/docs-audit.js';
+import { buildReviewContext } from '../src/review-context.js';
+import { syncDocs } from '../src/sync-docs.js';
+import { connectProject } from '../src/mcp-client.js';
+import { renderReview } from '../src/pr-review.js';
+
+const exec = promisify(execFile);
+const response = value => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(value) } }] }));
+async function fixture(t, documented = false) {
+  const root = await mkdtemp(resolve(tmpdir(), 'docs-validation-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const git = async (...args) => (await exec('git', ['-C', root, ...args])).stdout.trim();
+  await mkdir(resolve(root, 'docs'));
+  const readme = '# Application\n\nRun the Kotlin Multiplatform client.\n';
+  await writeFile(resolve(root, 'README.md'), readme);
+  await writeFile(resolve(root, 'docs/config.md'), '# Configuration\n\nClient uses the default timeout.\n');
+  await writeFile(resolve(root, 'Client.kt'), 'class Client\n');
+  await git('init', '-b', 'main');
+  await git('config', 'user.name', 'Docs Test'); await git('config', 'user.email', 'test@example.invalid');
+  await git('add', '.'); await git('commit', '-m', 'initial');
+  const base = await git('rev-parse', 'HEAD');
+  await writeFile(resolve(root, 'Client.kt'), 'class Client(val timeoutMs: Long = 5000)\n');
+  if (documented) await writeFile(resolve(root, 'docs/config.md'), '# Configuration\n\nClient.timeoutMs defaults to 5000 ms.\n');
+  await git('add', '.'); await git('commit', '-m', 'configurable timeout');
+  const head = await git('rev-parse', 'HEAD');
+  const config = { projectRoot: root, apiKey: 'test', model: 'test', baseUrl: 'https://example.invalid' };
+  const context = await buildReviewContext(root, base, head);
+  return { root, git, config, context, base, head, readme };
+}
+
+function retrieval(system, payload) {
+  if (!/^Ты агент поиска|^Ты независимый проверяющий/.test(system)) return null;
+  return response(payload.readSections.length ? { action: 'done' } : { action: 'read', paths: payload.catalog.map(d => d.path) });
+}
+
+test('PR audit flags an undocumented public parameter, verifies it and renders a separate section', async t => {
+  const { config, context } = await fixture(t);
+  let verified = false;
+  const audit = await auditDocumentation(config, context, { fetchImpl: async (_url, init) => {
+    const { messages } = JSON.parse(init.body), system = messages[0].content, payload = JSON.parse(messages[1].content);
+    const retrieved = retrieval(system, payload); if (retrieved) return retrieved;
+    const code = payload.sources.find(s => s.path === 'head:Client.kt');
+    const doc = payload.sources.find(s => s.path === 'head:docs/config.md');
+    assert.match(code.text, /timeoutMs/); assert.match(doc.text, /default timeout/);
+    if (payload.draft) verified = true;
+    return response({ summary: 'Новый параметр не описан.', findings: [{ path: 'Client.kt', side: 'RIGHT', line: 1,
+      document: 'docs/config.md', title: 'Опишите timeoutMs', body: 'Добавлен настраиваемый timeoutMs=5000; обновите руководство.', sources: [code.id, doc.id] }] });
+  } });
+  assert.equal(verified, true); assert.equal(audit.status, 'checked'); assert.equal(audit.findings.length, 1);
+  const report = renderReview({ context, sources: [], retrieval: { status: 'checked' }, review: { summary: 'Code review', findings: [] }, documentationAudit: audit }, 'o/r');
+  assert.match(report, /Актуальность документации/); assert.match(report, /timeoutMs/); assert.match(report, /Источники аудита: \[D/);
+});
+
+test('PR audit sees documentation updated in the same PR even when retrieval did not select it', async t => {
+  const { config, context } = await fixture(t, true);
+  const audit = await auditDocumentation(config, context, { fetchImpl: async (_url, init) => {
+    const { messages } = JSON.parse(init.body), system = messages[0].content, payload = JSON.parse(messages[1].content);
+    if (/^Ты агент поиска|^Ты независимый проверяющий/.test(system)) return response(payload.readSections.length
+      ? { action: 'done' } : { action: 'read', paths: ['head:Client.kt'] });
+    assert.ok(payload.sources.some(s => s.path === 'head:docs/config.md' && s.text.includes('5000 ms')));
+    return response({ summary: 'Документация уже обновлена автором.', findings: [] });
+  } });
+  assert.equal(audit.status, 'checked'); assert.deepEqual(audit.findings, []);
+});
+
+test('audit does not report a clean result when source retrieval is incomplete', async t => {
+  const { config, context } = await fixture(t);
+  const audit = await auditDocumentation(config, context, { fetchImpl: async () => response({ action: 'read', paths: ['unknown.kt'] }) });
+  assert.equal(audit.status, 'limit'); assert.deepEqual(audit.findings, []);
+});
+
+test('audit validation rejects invented documents, unchanged lines and unsupported evidence', async t => {
+  const { context } = await fixture(t);
+  const sources = [{ sourcePath: 'Client.kt' }, { sourcePath: 'docs/config.md', revision: 'head' }];
+  const finding = { path: 'Client.kt', side: 'RIGHT', line: 1, document: 'docs/config.md', title: 'Config', body: 'Update timeout.', sources: [1, 2] };
+  for (const change of [{ document: 'docs/invented.md' }, { line: 400 }, { sources: [1] }, { sources: [99] }]) {
+    assert.throws(() => validateDocsAudit({ summary: 'x', findings: [{ ...finding, ...change }] }, context, sources, ['docs/config.md']));
+  }
+});
+
+test('link checks parse reference links and images, ignore code examples and tolerate old broken links', async t => {
+  const { root, readme } = await fixture(t);
+  const originals = { 'README.md': readme + '\n[Old](old-missing.md)\n' };
+  const valid = originals['README.md'] + '\n[Config][config]\n\n[config]: docs/config.md\n\n```md\n[Example](not-a-file.md)\n```\n';
+  assert.equal((await checkDocumentationLinks(root, originals, [{ path: 'README.md', content: valid }])).status, 'checked');
+  const failed = await checkDocumentationLinks(root, originals, [{ path: 'README.md', content: valid + '\n![Image](missing.png)\n[Bad][bad]\n\n[bad]: docs/missing.md\n[Escape](../outside.md)\n' }]);
+  assert.equal(failed.issues.length, 3);
+  assert.ok(failed.issues.some(i => i.href === 'docs/missing.md'));
+});
+
+test('documentation verifier requires an explicit verdict for every changed document', () => {
+  assert.throws(() => validateDocsVerification({ approved: true, reviewedPaths: [], issues: [] }, ['README.md']));
+  assert.throws(() => validateDocsVerification({ approved: true, reviewedPaths: ['README.md'], issues: [{ path: 'README.md', reason: 'Missing class' }] }, ['README.md']));
+  assert.throws(() => validateDocsVerification({ approved: false, reviewedPaths: ['README.md'], issues: [] }, ['README.md']));
+});
+
+test('links validate heading anchors against proposed docs and catch breakage in untouched documents', async t => {
+  const { root } = await fixture(t);
+  const originals = { 'README.md': '# Project\n[Settings](docs/config.md#настройки-api-1)\n',
+    'docs/config.md': '# Configuration\n## Настройки `API`\n## Настройки **API**\n' };
+  assert.equal((await checkDocumentationLinks(root, originals, [])).status, 'checked');
+  const failed = await checkDocumentationLinks(root, originals, [{ path: 'docs/config.md', content: '# Configuration\n## New settings\n' }]);
+  assert.equal(failed.issues.length, 1); assert.equal(failed.issues[0].path, 'README.md');
+  assert.match(failed.issues[0].reason, /Якорь/);
+  const sameFile = await checkDocumentationLinks(root, originals, [{ path: 'docs/config.md', content: originals['docs/config.md'] + '\n[Local](#absent)\n[Root](../)\n' }]);
+  assert.equal(sameFile.issues.length, 1); assert.equal(sameFile.issues[0].href, '#absent');
+});
+
+for (const mode of ['broken-link', 'invented-api', 'incomplete-verification']) {
+  test(`sync blocks ${mode} before saving any document`, async t => {
+    const { config, root, base, readme } = await fixture(t);
+    const mcp = await connectProject(root); t.after(() => mcp.close());
+    let writerCalled = false, verifierCalled = false;
+    await assert.rejects(syncDocs(config, mcp, base, { apply: true, fetchImpl: async (_url, init) => {
+      const { messages } = JSON.parse(init.body), system = messages[0].content, payload = JSON.parse(messages[1].content);
+      if (mode === 'incomplete-verification' && writerCalled && /^Ты агент поиска|^Ты независимый проверяющий/.test(system)) return response({ action: 'read', paths: ['unknown.kt'] });
+      const retrieved = retrieval(system, payload); if (retrieved) return retrieved;
+      if (system.startsWith('Ты change_agent')) return new Response(JSON.stringify({ choices: [{ message: { content: 'Client.timeoutMs added.' } }] }));
+      if (system.startsWith('Ты docs_sync_agent')) {
+        writerCalled = true;
+        return response({ summary: 'Update docs', updates: [{ path: 'README.md', content: readme + (mode === 'broken-link' ? '\n[Config](docs/absent.md)\n' : '\nUse ImaginaryClient.configureMagic() to configure timeout.\n') }] });
+      }
+      assert.ok(system.startsWith('Ты docs_verifier'));
+      verifierCalled = true;
+      assert.ok(payload.sources.some(s => s.sourcePath === 'Client.kt' && s.text.includes('timeoutMs')));
+      return response({ approved: false, reviewedPaths: ['README.md'], issues: [{ path: 'README.md', reason: 'ImaginaryClient.configureMagic does not exist in the read sources.' }] });
+    } }), mode === 'broken-link' ? /Проверка ссылок/ : mode === 'invented-api' ? /Проверяющий отклонил/ : /Проверка документации неполна/);
+    assert.equal(writerCalled, true); assert.equal(verifierCalled, mode === 'invented-api');
+    assert.equal(await readFile(resolve(root, 'README.md'), 'utf8'), readme);
+  });
+}
+
+test('a historical sync verifies proposed contracts against the current checkout', async t => {
+  const { root, git, config, base, head, readme } = await fixture(t);
+  await writeFile(resolve(root, 'Client.kt'), 'class Client(val timeoutSeconds: Long = 5)\n');
+  await git('add', 'Client.kt'); await git('commit', '-m', 'replace timeout parameter');
+  const mcp = await connectProject(root); t.after(() => mcp.close());
+  let checkedCurrent = false;
+  await assert.rejects(syncDocs(config, mcp, base, { head, apply: true, fetchImpl: async (_url, init) => {
+    const { messages } = JSON.parse(init.body), system = messages[0].content, payload = JSON.parse(messages[1].content);
+    const retrieved = retrieval(system, payload); if (retrieved) return retrieved;
+    if (system.startsWith('Ты change_agent')) return new Response(JSON.stringify({ choices: [{ message: { content: 'timeoutMs added.' } }] }));
+    if (system.startsWith('Ты docs_sync_agent')) return response({ summary: 'Document timeout', updates: [{ path: 'README.md', content: readme + '\nUse Client.timeoutMs to configure the client.\n' }] });
+    assert.ok(system.startsWith('Ты docs_verifier'));
+    const current = payload.sources.find(s => s.path === 'head:Client.kt');
+    assert.match(current.text, /timeoutSeconds/); assert.ok(!current.text.includes('timeoutMs'));
+    checkedCurrent = true;
+    return response({ approved: false, reviewedPaths: ['README.md'], issues: [{ path: 'README.md', reason: 'timeoutMs has been replaced with timeoutSeconds.' }] });
+  } }), /Проверяющий отклонил/);
+  assert.equal(checkedCurrent, true); assert.equal(await readFile(resolve(root, 'README.md'), 'utf8'), readme);
+});
