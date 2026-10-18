@@ -76,7 +76,7 @@ DIFF:
 ${context.diff}`;
   const initialSectionIds = [...changedProductionSections(context),
     ...context.index.chunks.flatMap((s, i) => s.revision === 'rules' ? [i + 1] : [])];
-  const evidence = await collectIndexedContext(context.index, config, question, { fetchImpl, onEvent, maxCharacters: 140000, initialSectionIds });
+  const evidence = await collectIndexedContext(context.index, config, question, { fetchImpl, onEvent, maxCharacters: 180000, maxSteps: 12, initialSectionIds });
   // Rules are mandatory context even when the retrieval model did not select them.
   const sources = [...evidence.sources];
   for (const chunk of context.index.chunks.filter(c => c.revision === 'rules')) {

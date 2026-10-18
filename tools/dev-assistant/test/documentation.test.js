@@ -60,6 +60,9 @@ test('PR audit flags an undocumented public parameter, verifies it and renders a
     const retrieved = retrieval(system, payload); if (retrieved) return retrieved;
     const code = payload.sources.find(s => s.path === 'head:Client.kt');
     const doc = payload.sources.find(s => s.path === 'head:docs/config.md');
+    assert.ok(payload.sources.every(s => !Object.hasOwn(s, 'sectionId')));
+    assert.ok(payload.anchors.find(a => a.path === 'Client.kt').sourceIds.includes(code.id));
+    assert.ok(payload.documentSources.find(d => d.document === 'docs/config.md').sourceIds.includes(doc.id));
     assert.match(code.text, /timeoutMs/); assert.match(doc.text, /default timeout/);
     if (payload.draft) verified = true;
     return response({ summary: 'Новый параметр не описан.', findings: [{ path: 'Client.kt', side: 'RIGHT', line: 1,
