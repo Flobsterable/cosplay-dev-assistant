@@ -35,9 +35,9 @@ export function changedLines(diff) {
   return result;
 }
 
-export async function buildReviewContext(root, baseRef, headRef) {
+export async function buildReviewContext(root, baseRef, headRef, { documentationSync = false } = {}) {
   async function git(...args) {
-    return (await exec('git', ['-c', `safe.directory=${resolve(root)}`, '-c', 'core.quotePath=false', '-C', root, ...args], { timeout: 20000, maxBuffer: 4 * 1024 * 1024 })).stdout;
+    return (await exec('git', ['-c', `safe.directory=${resolve(root)}`, '-c', 'core.quotePath=false', '-C', root, ...args], { timeout: 20000, maxBuffer: documentationSync ? Infinity : 4 * 1024 * 1024 })).stdout;
   }
   async function sha(ref) {
     if (typeof ref !== 'string' || !ref.length || ref.length > 200 || ref.startsWith('-') || /[\s\x00-\x1f]/.test(ref)) throw new Error('Некорректный Git ref.');
@@ -48,10 +48,10 @@ export async function buildReviewContext(root, baseRef, headRef) {
   const raw = (await git('diff', '--name-status', '-z', '--no-renames', base, head, '--')).split('\0');
   const files = [];
   for (let i = 0; i + 1 < raw.length; i += 2) files.push({ status: raw[i], path: raw[i + 1] });
-  if (files.length > 100) throw new Error('PR содержит более 100 файлов: разбейте его на меньшие изменения.');
+  if (!documentationSync && files.length > 100) throw new Error('PR содержит более 100 файлов: разбейте его на меньшие изменения.');
   const eligible = files.filter(f => reviewable(f.path));
   const diff = eligible.length ? await git('diff', '--no-ext-diff', '--no-textconv', '--no-renames', '--unified=5', base, head, '--', ...eligible.map(f => f.path)) : '';
-  if (diff.length > 100000) throw new Error('Diff превышает 100 000 символов: разбейте PR. Проверка не выполнена.');
+  if (!documentationSync && diff.length > 100000) throw new Error('Diff превышает 100 000 символов: разбейте PR. Проверка не выполнена.');
   const chunks = [], documents = [], omitted = files.filter(f => !reviewable(f.path)).map(f => ({ path: f.path, reason: 'неподдерживаемый или исключённый тип файла' }));
   let total = 0, projectRules = null;
   async function indexTree(ref, label, filter) {
@@ -61,7 +61,7 @@ export async function buildReviewContext(root, baseRef, headRef) {
       if (!match || !reviewable(match[3]) || (filter && !filter.has(match[3]))) continue;
       const [, , blob, path] = match;
       const bytes = Number((await git('cat-file', '-s', blob)).trim());
-      if (bytes > 128000 || total + bytes > 1500000) { omitted.push({ path, reason: `${label}: лимит корпуса/файла` }); continue; }
+      if (!documentationSync && (bytes > 128000 || total + bytes > 1500000)) { omitted.push({ path, reason: `${label}: лимит корпуса/файла` }); continue; }
       const text = await git('cat-file', 'blob', blob);
       if (text.includes('\0')) { omitted.push({ path, reason: 'бинарное содержимое' }); continue; }
       total += bytes;

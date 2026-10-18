@@ -12,11 +12,11 @@ export async function collectDocumentation(config, question, options = {}) {
 }
 
 // /help supplies a README/docs-only index; PR review supplies a static Git-object index.
-export async function collectIndexedContext(index, config, question, { fetchImpl = fetch, onEvent = () => {}, maxSteps = 8, maxCharacters = 100000, gitContext = null, initialSectionIds = [] } = {}) {
+export async function collectIndexedContext(index, config, question, { fetchImpl = fetch, onEvent = () => {}, maxSteps = 8, maxCharacters = 100000, maxCatalogCharacters = 200000, gitContext = null, initialSectionIds = [] } = {}) {
   const sections = index.chunks.map(({ tokens, ...s }, i) => ({ ...s, sectionId: i + 1 }));
   const catalog = index.documents.map(path => ({ path, sections: sections.filter(s => s.path === path)
     .map(s => ({ sectionId: s.sectionId, heading: s.heading, lines: `${s.startLine}-${s.endLine}`, preview: s.text.slice(0, 160) })) }));
-  if (JSON.stringify(catalog).length > 200000) throw new Error('Каталог документации слишком велик для текущего контекста. Разделите корпус на проекты.');
+  if (JSON.stringify(catalog).length > maxCatalogCharacters) throw new Error('Каталог документации слишком велик для текущего контекста. Разделите корпус на проекты.');
   const selected = new Map();
   const history = [];
   const deferredSections = new Map();
