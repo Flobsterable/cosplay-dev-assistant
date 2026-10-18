@@ -212,13 +212,14 @@ test('truncated multi-document generation falls back to single files and verifie
     }
     if (system.startsWith('Ты docs_sync_agent')) {
       if (++writerCalls === 1) return new Response(JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: '{"updates":[' } }] }));
+      if (writerCalls === 2) return response({ summary: 'Malformed proposal', updates: {} });
       assert.equal(Object.keys(payload.documents).length, 1);
       assert.equal(await readFile(resolve(root, 'docs/config.md'), 'utf8'), '# Configuration\n\nClient uses the default timeout.\n');
       return response({ summary: 'Config checked.', updates: Object.hasOwn(payload.documents, 'docs/config.md') ? [{ path: 'docs/config.md', content: updated }] : [] });
     }
     return response({ approved: true, reviewedPaths: ['docs/config.md'], issues: [] });
   } });
-  assert.equal(writerCalls, 3); assert.equal(result.verification.status, 'checked');
+  assert.equal(writerCalls, 4); assert.equal(result.verification.status, 'checked');
   assert.equal(await readFile(resolve(root, 'README.md'), 'utf8'), readme);
   assert.equal(await readFile(resolve(root, 'docs/config.md'), 'utf8'), updated);
 });

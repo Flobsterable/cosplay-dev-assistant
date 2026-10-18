@@ -63,11 +63,19 @@ export async function syncDocs(config, mcp, base, { apply = false, head = 'HEAD'
   emit('docs_sync_agent', 'running', 'Подготовка новых версий затронутых Markdown-файлов');
   async function generate(documents) {
     const paths = Object.keys(documents);
-    const proposed = await complete(config, [
+    const messages = [
     { role: 'system', content: `Ты docs_sync_agent. ${policy} Сверь отчёт с diff. Обновляй только факты, подтверждённые diff, сохраняя остальную документацию. Проверяй КАЖДЫЙ документ по его назначению: упоминание фичи в одном техническом файле не означает актуальность остальных. Новые экраны и переходы должны попасть в описание фич, карту экранов, диаграммы и пользовательские флоу, а технические детали — в руководство реализации. Устраняй противоречащие diff старые утверждения, в том числе о сохранении состояния и возврате. Даже если часть документов уже обновлена в PR, проверь остальные; не возвращай пустое updates только из-за наличия названий новых классов где-либо. Верни JSON {"summary":"что и почему изменено","updates":[{"path":"docs/architecture.md","content":"полный Markdown файла"}]}. Разрешены только ${paths.join(', ')}. Не меняй код или настройки. Не создавай новые пути; выбирай только существующие документы из переданного списка. Если каждый переданный документ уже актуален для своего назначения, updates должен быть []. Не сокращай существующие разделы без причины. Верни полное содержимое каждого изменённого файла, не diff.` },
     { role: 'user', content: JSON.stringify({ analysis, diff: changes.diff, sources: context.sources, documents, documentCatalog: editableDocs }) }
-  ], fetchImpl, true, 8000);
-    return validateUpdates(JSON.parse(proposed), paths);
+    ];
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const proposed = await complete(config, messages, fetchImpl, true, 8000);
+      try { return validateUpdates(JSON.parse(proposed), paths); }
+      catch (error) {
+        if (attempt) throw new Error(`${paths.join(', ')}: ${error.message}`);
+        emit('docs_sync_agent', 'retry', `Исправляю формат ответа для ${paths.join(', ')}`);
+        messages.push({ role: 'assistant', content: proposed }, { role: 'user', content: `Ответ не прошёл проверку: ${error.message} Верни объект с обязательными summary (строка) и updates (массив). В updates допускается не более ${paths.length} файлов, только пути ${paths.join(', ')} без повторов. Для каждого обновления обязательны path и content (полный Markdown, начинающийся с #). Если изменений нет: {"summary":"документ актуален","updates":[]}.` });
+      }
+    }
   }
   let proposal;
   try {
@@ -76,7 +84,10 @@ export async function syncDocs(config, mcp, base, { apply = false, head = 'HEAD'
       if (!/Ответ модели обрезан лимитом токенов/.test(error.message) || editableDocs.length < 2) throw error;
       emit('docs_sync_agent', 'retry', 'Общий ответ обрезан: генерирую документы отдельно, запись только после полной проверки');
       const parts = [];
-      for (const path of editableDocs) parts.push(await generate({ [path]: originals[path] }));
+      for (const path of editableDocs) {
+        emit('docs_sync_agent', 'running', `Проверяю ${path}`);
+        parts.push(await generate({ [path]: originals[path] }));
+      }
       proposal = validateUpdates({ summary: parts.map(p => p.summary).join('\n'), updates: parts.flatMap(p => p.updates) }, editableDocs);
     }
   } catch (error) { throw new Error(`Предложение документации отклонено: ${error.message}`); }
