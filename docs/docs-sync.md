@@ -39,8 +39,8 @@ BASE_SHA — целевая ветка перед слиянием, MERGED_SHA �
 ## GitHub Actions
 
 Скопируйте examples/workflows/docs-sync.yml в .github/workflows/docs-sync.yml
-репозитория приложения. Замените REPLACE_WITH_DOCS_RUNTIME_SHA на SHA коммита
-ассистента, содержащего эту реализацию. Шаблон не устанавливается в сам репозиторий
+репозитория приложения. Runtime уже закреплён на коммите ассистента с этой реализацией;
+при обновлении агента обновляйте и его ref в workflow. Шаблон не устанавливается в сам репозиторий
 ассистента: его документация описывает JavaScript, а целевой сценарий рассчитан на KMP.
 
 Настройте Secret LLM_API_KEY, Variables LLM_MODEL/LLM_BASE_URL и разрешение
