@@ -78,7 +78,7 @@ export function validateDocsVerification(value, paths) {
   return value;
 }
 
-export async function verifyDocumentation(config, { root, originals, updates, diff, index, fetchImpl = fetch, onEvent = () => {} }) {
+export async function verifyDocumentation(config, { root, originals, updates, diff, index, fetchImpl = fetch, onEvent = () => {}, approvals = new Map() }) {
   if (!updates.length) return { status: 'unchanged', links: { status: 'checked', issues: [] }, issues: [] };
   const links = await checkDocumentationLinks(root, originals, updates);
   if (links.issues.length) throw new Error(`Проверка ссылок отклонила документацию: ${links.issues.map(i => `${i.path}: ${i.href} — ${i.reason}`).join('; ')}`);
@@ -87,7 +87,8 @@ export async function verifyDocumentation(config, { root, originals, updates, di
   // evidence; include both old and proposed prose in each batch's budget.
   const batches = [];
   let batch = [], characters = 0;
-  for (const update of updates) {
+  const key = update => JSON.stringify([originals[update.path], update.content]);
+  for (const update of updates.filter(u => approvals.get(u.path)?.key !== key(u))) {
     const size = (originals[update.path] || '').length + update.content.length;
     if (size > 80000) throw new Error(`Документ ${update.path} слишком велик для независимой проверки. Файлы не сохранены.`);
     if (batch.length && characters + size > 40000) {
@@ -96,15 +97,33 @@ export async function verifyDocumentation(config, { root, originals, updates, di
     batch.push(update); characters += size;
   }
   if (batch.length) batches.push(batch);
-  const results = [];
+  const issues = [];
   for (const updates of batches) {
     const documents = Object.fromEntries(updates.map(u => [u.path, originals[u.path] || '']));
     const batchPatch = updates.map(u => createTwoFilesPatch(`a/${u.path}`, `b/${u.path}`, documents[u.path], u.content)).join('\n');
-    results.push(await verifyBatch(config, { originals: documents, updates, diff, patch: batchPatch, index, fetchImpl, onEvent }));
+    let retrieval, rejected = [];
+    try {
+      retrieval = (await verifyBatch(config, { originals: documents, updates, diff, patch: batchPatch, index, fetchImpl, onEvent })).retrieval;
+    } catch (error) {
+      if (!error.documentationIssues) throw error;
+      issues.push(...error.documentationIssues);
+      rejected = error.documentationIssues.map(i => i.path);
+      retrieval = error.retrieval;
+    }
+    for (const update of updates.filter(u => !rejected.includes(u.path))) {
+      approvals.set(update.path, { key: key(update), retrieval });
+    }
   }
+  if (issues.length) throw verificationError(issues);
   onEvent({ agent: 'docs_verifier', status: 'done', detail: `Проверены ${updates.length} документов и относительные ссылки; порций: ${batches.length}` });
-  return { status: 'checked', links, reviewedPaths: results.flatMap(r => r.reviewedPaths),
-    retrieval: { status: 'checked', batches: results.map(r => r.retrieval) }, issues: [] };
+  return { status: 'checked', links, reviewedPaths: updates.map(u => u.path),
+    retrieval: { status: 'checked', batches: [...new Set(updates.map(u => approvals.get(u.path).retrieval))] }, issues: [] };
+}
+
+function verificationError(issues) {
+  const error = new Error(`Проверяющий отклонил документацию: ${issues.map(i => `${i.path}: ${i.reason}`).join('; ')}`);
+  error.documentationIssues = issues;
+  return error;
 }
 
 async function verifyBatch(config, { originals, updates, diff, patch, index, fetchImpl, onEvent }) {
@@ -123,8 +142,8 @@ async function verifyBatch(config, { originals, updates, diff, patch, index, fet
   ], fetchImpl, true, 4000);
   const result = validateDocsVerification(JSON.parse(raw), updates.map(u => u.path));
   if (!result.approved) {
-    const error = new Error(`Проверяющий отклонил документацию: ${result.issues.map(i => `${i.path}: ${i.reason}`).join('; ')}`);
-    error.documentationIssues = result.issues;
+    const error = verificationError(result.issues);
+    error.retrieval = evidence.retrieval;
     throw error;
   }
   onEvent({ agent: 'docs_verifier', status: 'done', detail: `Проверены ${updates.length} документов и относительные ссылки` });

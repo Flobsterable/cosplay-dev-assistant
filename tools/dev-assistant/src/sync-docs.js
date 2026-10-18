@@ -111,10 +111,13 @@ export async function syncDocs(config, mcp, base, { apply = false, head = 'HEAD'
     throw new Error('Не удалось полностью прочитать текущий код для проверки документации. Файлы не сохранены.');
   }
   let verification;
+  // Reuse only explicit verdicts for identical prose against this fixed corpus.
+  // The final Git check still rejects a checkout/source change before writing.
+  const approvals = new Map();
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       verification = await verifyDocumentation(config, { root: config.projectRoot, originals, updates,
-        diff: changes.diff, patch, index: verificationCorpus.index, fetchImpl,
+        diff: changes.diff, patch, index: verificationCorpus.index, fetchImpl, approvals,
         onEvent: event => emit(event.agent, event.status, event.detail) });
       break;
     } catch (error) {
@@ -123,7 +126,8 @@ export async function syncDocs(config, mcp, base, { apply = false, head = 'HEAD'
       emit('docs_sync_agent', 'repair', `Исправляю замечания проверяющего: ${paths.join(', ')} (${attempt + 1}/2)`);
       const corrected = await generateAll(Object.fromEntries(paths.map(path => [path, originals[path]])),
         { issues: error.documentationIssues, previousUpdates: updates.filter(u => paths.includes(u.path)) });
-      updates = normalize([...updates.filter(u => !paths.includes(u.path)), ...corrected.updates]);
+      const replacements = new Map(corrected.updates.map(u => [u.path, u]));
+      updates = normalize(updates.flatMap(u => paths.includes(u.path) ? (replacements.has(u.path) ? [replacements.get(u.path)] : []) : [u]));
       patch = makePatch();
     }
   }

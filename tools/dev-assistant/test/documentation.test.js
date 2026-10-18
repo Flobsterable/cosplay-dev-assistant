@@ -379,6 +379,33 @@ for (const rejectLast of [false, true]) {
   });
 }
 
+test('verification collects every batch issue and rechecks only changed or rejected prose', async t => {
+  const { root, config, context } = await fixture(t);
+  const originals = Object.fromEntries(['README.md', 'docs/config.md', 'docs/guide.md'].map(p => [p, '# Before\n' + 'a'.repeat(6000)]));
+  const updates = Object.keys(originals).map(path => ({ path, content: '# After\n' + 'b'.repeat(9000) }));
+  const approvals = new Map(), reviewed = [];
+  let repairing = false;
+  const verify = () => verifyDocumentation(config, { root, originals, updates, diff: context.diff, index: context.index, approvals,
+    fetchImpl: async (_url, init) => {
+      const { messages } = JSON.parse(init.body), system = messages[0].content, payload = JSON.parse(messages[1].content);
+      const found = retrieval(system, payload); if (found) return found;
+      const paths = payload.updates.map(u => u.path); reviewed.push(paths);
+      const issues = repairing ? [] : paths.filter(p => p !== 'README.md').map(path => ({ path, reason: 'Needs correction' }));
+      return response({ approved: !issues.length, reviewedPaths: paths, issues });
+    } });
+  await assert.rejects(verify(), error => {
+    assert.deepEqual(error.documentationIssues.map(i => i.path), ['docs/config.md', 'docs/guide.md']); return true;
+  });
+  assert.equal(reviewed.length, 2);
+  repairing = true;
+  await verify();
+  assert.deepEqual(reviewed[2], ['docs/config.md', 'docs/guide.md']);
+  // A previous approval cannot cover a subsequent change to that document.
+  updates[0].content += '\nChanged again.\n';
+  await verify();
+  assert.deepEqual(reviewed[3], ['README.md']);
+});
+
 test('links validate heading anchors against proposed docs and catch breakage in untouched documents', async t => {
   const { root } = await fixture(t);
   const originals = { 'README.md': '# Project\n[Settings](docs/config.md#настройки-api-1)\n',
