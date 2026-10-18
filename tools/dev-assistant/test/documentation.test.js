@@ -174,6 +174,56 @@ test('audit validation rejects invented documents, unchanged lines and unsupport
   }
 });
 
+test('post-merge sync keeps large docs outside the code budget for generation and verification', async t => {
+  const { root, git, config, base } = await fixture(t);
+  await writeFile(resolve(root, 'docs/large.md'), '# Large guide\n' + 'Existing documentation. '.repeat(2800));
+  await git('add', '.'); await git('commit', '-m', 'large existing guide');
+  const mcp = await connectProject(root); t.after(() => mcp.close());
+  let coveragePasses = 0;
+  const updated = '# Configuration\n\nClient.timeoutMs defaults to 5000 ms.\n';
+  const result = await syncDocs(config, mcp, base, { apply: true, fetchImpl: async (_url, init) => {
+    const { messages } = JSON.parse(init.body), system = messages[0].content, payload = JSON.parse(messages[1].content);
+    if (/^Ты агент поиска|^Ты независимый проверяющий/.test(system)) {
+      assert.ok(payload.catalog.every(d => !d.path.endsWith('.md')));
+      assert.ok(payload.readSections.some(s => s.sourcePath === 'Client.kt' && s.text.includes('timeoutMs')));
+      assert.ok(Object.values(payload.gitContext.documents).join('').length > 60000);
+      if (/^Ты независимый/.test(system)) coveragePasses++;
+      return response({ action: 'done' });
+    }
+    if (system.startsWith('Ты change_agent')) return new Response(JSON.stringify({ choices: [{ message: { content: 'Client.timeoutMs added.' } }] }));
+    if (system.startsWith('Ты docs_sync_agent')) return response({ summary: 'Document timeout.', updates: [{ path: 'docs/config.md', content: updated }] });
+    return response({ approved: true, reviewedPaths: ['docs/config.md'], issues: [] });
+  } });
+  assert.equal(result.verification.status, 'checked'); assert.equal(coveragePasses, 2);
+  assert.equal(await readFile(resolve(root, 'docs/config.md'), 'utf8'), updated);
+});
+
+test('truncated multi-document generation falls back to single files and verifies all before saving', async t => {
+  const { root, config, base, readme } = await fixture(t);
+  const mcp = await connectProject(root); t.after(() => mcp.close());
+  let writerCalls = 0;
+  const updated = '# Configuration\n\nClient.timeoutMs defaults to 5000 ms.\n';
+  const result = await syncDocs(config, mcp, base, { apply: true, fetchImpl: async (_url, init) => {
+    const { messages } = JSON.parse(init.body), system = messages[0].content, payload = JSON.parse(messages[1].content);
+    const found = retrieval(system, payload); if (found) return found;
+    if (system.startsWith('Ты change_agent')) {
+      assert.equal(JSON.parse(init.body).max_tokens, 8000);
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'Client.timeoutMs added.' } }] }));
+    }
+    if (system.startsWith('Ты docs_sync_agent')) {
+      if (++writerCalls === 1) return new Response(JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: '{"updates":[' } }] }));
+      if (writerCalls === 2) return response({ summary: 'Malformed proposal', updates: {} });
+      assert.equal(Object.keys(payload.documents).length, 1);
+      assert.equal(await readFile(resolve(root, 'docs/config.md'), 'utf8'), '# Configuration\n\nClient uses the default timeout.\n');
+      return response({ summary: 'Config checked.', updates: Object.hasOwn(payload.documents, 'docs/config.md') ? [{ path: 'docs/config.md', content: updated }] : [] });
+    }
+    return response({ approved: true, reviewedPaths: ['docs/config.md'], issues: [] });
+  } });
+  assert.equal(writerCalls, 4); assert.equal(result.verification.status, 'checked');
+  assert.equal(await readFile(resolve(root, 'README.md'), 'utf8'), readme);
+  assert.equal(await readFile(resolve(root, 'docs/config.md'), 'utf8'), updated);
+});
+
 test('link checks parse reference links and images, ignore code examples and tolerate old broken links', async t => {
   const { root, readme } = await fixture(t);
   const originals = { 'README.md': readme + '\n[Old](old-missing.md)\n' };
