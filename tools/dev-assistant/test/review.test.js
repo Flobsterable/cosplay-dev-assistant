@@ -36,7 +36,7 @@ async function fixture(t) {
   const head = await git('rev-parse', 'HEAD');
   // Working tree is explicitly not the PR source.
   await put('LoadingBlock.kt', 'WORKTREE_SENTINEL_SHOULD_NOT_BE_READ\n');
-  return { root, git, put, base, head, config: { projectRoot: root, apiKey: 'fake', model: 'fake', baseUrl: 'https://example.invalid' } };
+  return { root, git, put, base, head, config: { projectRoot: root, executionMode: 'thorough', maxCalls: 200, maxInputCharacters: 100000000, apiKey: 'fake', model: 'fake', baseUrl: 'https://example.invalid' } };
 }
 
 test('review context uses merge-base and Git blobs, including both sides, never working files or env', async t => {

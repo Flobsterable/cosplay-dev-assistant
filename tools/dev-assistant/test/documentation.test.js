@@ -41,7 +41,7 @@ async function fixture(t, documented = false) {
   if (documented) await writeFile(resolve(root, 'docs/config.md'), '# Configuration\n\nClient.timeoutMs defaults to 5000 ms.\n');
   await git('add', '.'); await git('commit', '-m', 'configurable timeout');
   const head = await git('rev-parse', 'HEAD');
-  const config = { projectRoot: root, apiKey: 'test', model: 'test', baseUrl: 'https://example.invalid' };
+  const config = { projectRoot: root, executionMode: 'thorough', maxCalls: 200, maxInputCharacters: 100000000, apiKey: 'test', model: 'test', baseUrl: 'https://example.invalid' };
   const context = await buildReviewContext(root, base, head);
   return { root, git, config, context, base, head, readme };
 }
@@ -207,7 +207,7 @@ test('CLI saves an incomplete audit report but exits nonzero', async t => {
   t.after(() => new Promise(resolve => server.close(resolve)));
   const output = resolve(root, 'report');
   await assert.rejects(exec(process.execPath, [resolve('src/review-cli.js'), '--base', base, '--head', head, '--repo', 'o/r', '--output', output], {
-    env: { ...process.env, PROJECT_ROOT: root, LLM_API_KEY: 'fake', LLM_MODEL: 'fake', LLM_BASE_URL: `http://127.0.0.1:${server.address().port}`, GITHUB_STEP_SUMMARY: '' }
+    env: { ...process.env, PROJECT_ROOT: root, LLM_EXECUTION_MODE: 'thorough', LLM_MAX_CALLS: '200', LLM_MAX_INPUT_CHARACTERS: '100000000', LLM_API_KEY: 'fake', LLM_MODEL: 'fake', LLM_BASE_URL: `http://127.0.0.1:${server.address().port}`, GITHUB_STEP_SUMMARY: '' }
   }), error => error.code === 1 && /не считается успешной/.test(error.stderr));
   const report = JSON.parse(await readFile(resolve(output, 'review.json'), 'utf8'));
   assert.equal(report.documentationAudit.status, 'limit');

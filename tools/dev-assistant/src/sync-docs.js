@@ -1,7 +1,7 @@
 import { readFile, writeFile, realpath, lstat } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import { createTwoFilesPatch } from 'diff';
-import { complete, prepareQuestion } from './assistant.js';
+import { complete, prepareQuestion, createRunConfig } from './assistant.js';
 import { discoverEditableDocs } from './doc-paths.js';
 import { collectIndexedContext } from './document-agent.js';
 import { verifyDocumentation } from './docs-verifier.js';
@@ -40,7 +40,13 @@ async function docPath(root, file) {
   return target;
 }
 
-export async function syncDocs(config, mcp, base, { apply = false, head = 'HEAD', fetchImpl = fetch, onEvent = () => {} } = {}) {
+export async function syncDocs(config, mcp, base, { apply = false, planOnly = false, head = 'HEAD', fetchImpl = fetch, onEvent = () => {} } = {}) {
+  if (config.executionMode !== 'thorough') {
+    const { syncEconomically } = await import('./economy-sync.js');
+    return syncEconomically(config, mcp, base, { apply, planOnly, head, fetchImpl, onEvent });
+  }
+  if (planOnly) throw new Error('--plan доступен в режиме economy.');
+  config = createRunConfig(config);
   const trace = [];
   const emit = (agent, status, detail) => { const event = { agent, status, detail }; trace.push(event); onEvent(event); };
   const plan = { mode: 'sequential', tasks: [{ agent: 'change_agent', task: 'Выделить изменения поведения из Git diff' }, { agent: 'docs_sync_agent', task: 'Обновить затронутую документацию' }, { agent: 'docs_verifier', task: 'Проверить новые утверждения и ссылки до записи' }] };

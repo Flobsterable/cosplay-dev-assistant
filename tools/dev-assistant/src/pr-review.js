@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises';
-import { complete } from './assistant.js';
+import { complete, createRunConfig } from './assistant.js';
 import { collectIndexedContext } from './document-agent.js';
 import { buildReviewContext } from './review-context.js';
 import { reviewHeadMarker } from './review-github.js';
@@ -58,6 +58,11 @@ export function validateReview(value, context, sources) {
 }
 
 export async function reviewPullRequest(config, { base, head, fetchImpl = fetch, onEvent = () => {} }) {
+  if (config.executionMode !== 'thorough') {
+    const { reviewEconomically } = await import('./economy-review.js');
+    return reviewEconomically(config, { base, head, fetchImpl, onEvent });
+  }
+  config = createRunConfig(config);
   const context = await buildReviewContext(config.projectRoot, base, head);
   const profile = await readFile(new URL('../profiles/base-review.md', import.meta.url), 'utf8');
   context.baseRuleIds = ruleIds(profile, 'B');
@@ -155,7 +160,8 @@ export function renderReview(result, repository) {
     '**Базовые правила агента:** ' + escape(result.layers.baseSummary || 'Нет анализируемых изменений.'), '',
     '**Правила проекта:** ' + escape(result.layers.projectSummary || 'Нет анализируемых изменений.'), '',
     'Версия правил проекта: \x60' + (result.layers.projectRef || context.baseTip) + '\x60 (базовая ветка).', '');
-  if (retrieval.status !== 'checked' || context.omitted.length) lines.push('**Проверка неполная:** достигнут лимит контекста или часть файлов исключена. См. отчёт JSON в артефакте.', '');
+  if (retrieval.status === 'scoped') lines.push('Контекст подобран локально по изменённым участкам, определениям и местам использования. Полный аудит всего репозитория не выполнялся.', '');
+  if ((!['checked', 'scoped'].includes(retrieval.status)) || context.omitted.length) lines.push('**Проверка неполная:** достигнут лимит контекста или часть файлов исключена. См. отчёт JSON в артефакте.', '');
   const labels = { bug: 'Потенциальные баги', architecture: 'Архитектурные проблемы', recommendation: 'Рекомендации' };
   for (const category of categories) {
     lines.push(`### ${labels[category]}`, '');

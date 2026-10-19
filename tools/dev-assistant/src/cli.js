@@ -35,11 +35,14 @@ async function main() {
           parts.splice(headIndex, 2);
         }
         const apply = parts.includes('--apply');
-        const refs = parts.filter(p => p !== '--apply');
+        const planOnly = parts.includes('--plan');
+        if (apply && planOnly) throw new Error('--plan нельзя сочетать с --apply.');
+        const refs = parts.filter(p => !['--apply', '--plan'].includes(p));
         if (refs.length > 1) throw new Error('Формат: /sync BASE [--head SHA] [--apply]');
-        const result = await syncDocs(config, mcp, refs[0] || 'HEAD~1', { apply, head,
+        const result = await syncDocs(config, mcp, refs[0] || 'HEAD~1', { apply, planOnly, head,
           onEvent: event => console.log(`[${event.agent}] ${event.status}: ${event.detail}`) });
         console.log('\n' + result.answer);
+        if (result.usage) console.log('[llm_usage] ' + JSON.stringify(result.usage));
         return;
       }
       if (!/^\/help(?:\s|$)/.test(input)) throw new Error('Используйте /help ваш вопрос. Выход: /exit');

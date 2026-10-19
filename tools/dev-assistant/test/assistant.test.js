@@ -43,7 +43,7 @@ async function fixture(t) {
   await git('commit', '-m', 'add city');
   const mcp = await connectProject(root);
   t.after(() => mcp.close());
-  const config = { projectRoot: root, apiKey: 'test-key', model: 'test-model', baseUrl: 'http://127.0.0.1' };
+  const config = { projectRoot: root, executionMode: 'thorough', maxCalls: 200, maxInputCharacters: 100000000, apiKey: 'test-key', model: 'test-model', baseUrl: 'http://127.0.0.1' };
   return { root, git, base, mcp, config };
 }
 const reply = content => new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
