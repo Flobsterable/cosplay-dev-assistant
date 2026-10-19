@@ -24,9 +24,10 @@ async function main() {
   await writeFile(resolve(output, 'review.json'), JSON.stringify({ review: result.review, layers: result.layers,
     documentationAudit: result.documentationAudit ? { ...result.documentationAudit,
       sources: result.documentationAudit.sources.map(({ text, tokens, ...s }) => s) } : null,
-    base: result.context.base, head: result.context.head,
+    usage: result.usage, base: result.context.base, head: result.context.head,
     files: result.context.files, omitted: result.context.omitted, retrieval: result.retrieval,
     sources: result.sources.map(({ text, tokens, ...s }) => s) }, null, 2) + '\n');
+  if (result.usage) console.log('[llm_usage] ' + JSON.stringify(result.usage));
   if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, body + '\n');
   if (flags.publish) {
     const published = await publishReview({ repository: flags.repo, number: Number(flags.pr), head: result.context.head, body, token: process.env.GITHUB_TOKEN });

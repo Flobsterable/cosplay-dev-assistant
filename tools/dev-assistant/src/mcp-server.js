@@ -31,7 +31,7 @@ server.registerTool('get_sync_context', {
   description: 'Каталог и поисковый индекс закоммиченных исходников и документации для обновления docs. Симлинки и секреты исключены.',
   inputSchema: { base: z.string().min(1).max(200), head: z.string().min(1).max(200).optional() }, annotations: readOnly
 }, async ({ base, head }) => {
-  const context = await buildReviewContext(root, base, head || 'HEAD');
+  const context = await buildReviewContext(root, base, head || 'HEAD', { documentationSync: true });
   return result({ head: context.head, index: context.index, omitted: context.omitted });
 });
 
