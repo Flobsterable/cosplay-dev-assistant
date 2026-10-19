@@ -1,112 +1,59 @@
-name: Update documentation with AI
-
+name: Update project documentation
 on:
-  pull_request:
-    types: [closed]
+  push:
     branches: [develop, main]
+    paths:
+      - '**/*.kt'
+      - '**/*.kts'
+      - '**/*.toml'
+      - 'gradle.properties'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/docs-sync.yml'
+      - '.github/scripts/docs-sync-status*.cjs'
+      - '.github/scripts/docs-sync-run.sh'
+      - '.github/scripts/agent-*.cjs'
   workflow_dispatch:
     inputs:
       base:
-        description: 'Original PR base SHA (copy from the first run log)'
+        description: 'Full base SHA before the merged change'
         required: true
       head:
-        description: 'Merged PR SHA (copy from the first run log)'
+        description: 'Full merged SHA to analyse'
         required: true
-
 permissions:
-  contents: write
-  pull-requests: write
-
+  contents: read
 concurrency:
-  group: docs-sync-${{ github.event.pull_request.base.ref || github.ref_name }}
+  group: docs-sync-dispatch-${{ github.ref_name }}-${{ inputs.head || github.sha }}
   cancel-in-progress: false
-
 jobs:
-  docs-sync:
-    # Fork PRs do not receive secrets/write tokens with pull_request.
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.merged == true &&
-       github.event.pull_request.head.repo.full_name == github.repository &&
-       !startsWith(github.event.pull_request.head.ref, 'automation/docs-sync-'))
+  sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
-      - name: Checkout current target documentation
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.base.ref || github.ref_name }}
-          fetch-depth: 0
-      - name: Checkout assistant runtime
-        uses: actions/checkout@v4
-        with:
-          repository: Flobsterable/cosplay-dev-assistant
-          ref: 764ea83e611f14480fcf12baf235842e02f2c970
-          path: .assistant-runtime
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: npm
-          cache-dependency-path: .assistant-runtime/tools/dev-assistant/package-lock.json
-      - run: npm ci --ignore-scripts
-        working-directory: .assistant-runtime/tools/dev-assistant
-      - name: Resolve immutable source range
-        id: range
+      - name: Check dispatch credential
+        uses: actions/github-script@v8
         env:
-          BASE_REF: ${{ inputs.base || github.event.pull_request.base.sha }}
-          HEAD_REF: ${{ inputs.head || github.event.pull_request.merge_commit_sha }}
-        shell: bash
-        run: |
-          [[ "$BASE_REF" =~ ^[0-9a-f]{40}$ ]] && [[ "$HEAD_REF" =~ ^[0-9a-f]{40}$ ]] || exit 1
-          git cat-file -e "$BASE_REF^{commit}"
-          git cat-file -e "$HEAD_REF^{commit}"
-          git merge-base --is-ancestor "$BASE_REF" "$HEAD_REF"
-          git merge-base --is-ancestor "$HEAD_REF" HEAD
-          echo "base=$BASE_REF" >> "$GITHUB_OUTPUT"
-          echo "head=$HEAD_REF" >> "$GITHUB_OUTPUT"
-          echo "Repeat: /sync $BASE_REF --head $HEAD_REF"
-      - name: Generate documentation changes
-        working-directory: .assistant-runtime/tools/dev-assistant
-        env:
-          PROJECT_ROOT: ${{ github.workspace }}
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          LLM_SMALL_TASK_PROVIDER: gemini
-          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.5-flash-lite' }}
-          GEMINI_BASE_URL: ${{ vars.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai' }}
-          LLM_SMALL_TASK_MAX_INPUT_CHARACTERS: ${{ vars.LLM_SMALL_TASK_MAX_INPUT_CHARACTERS || '24000' }}
-          LLM_SMALL_TASK_MAX_OUTPUT_TOKENS: ${{ vars.LLM_SMALL_TASK_MAX_OUTPUT_TOKENS || '6000' }}
-          LLM_EXECUTION_MODE: economy
-          LLM_MAX_CALLS: ${{ vars.LLM_MAX_CALLS || '24' }}
-          LLM_MAX_INPUT_CHARACTERS: ${{ vars.LLM_MAX_INPUT_CHARACTERS || '1000000' }}
-          LLM_MODEL: ${{ vars.LLM_MODEL }}
-          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
-          BASE_REF: ${{ steps.range.outputs.base }}
-          HEAD_REF: ${{ steps.range.outputs.head }}
-        run: |
-          set -o pipefail
-          node src/cli.js /sync "$BASE_REF" --head "$HEAD_REF" --apply | tee "$RUNNER_TEMP/docs-sync.txt"
-      - name: Save diff and agent trace
-        if: always()
-        uses: actions/upload-artifact@v4
+          AGENT_DISPATCH_TOKEN: ${{ secrets.AGENT_DISPATCH_TOKEN }}
         with:
-          name: docs-sync-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/docs-sync.txt
-          if-no-files-found: ignore
-      - name: Open or update documentation PR
-        uses: peter-evans/create-pull-request@v8
+          script: |
+            if (!process.env.AGENT_DISPATCH_TOKEN) {
+              core.setFailed('Save AGENT_DISPATCH_TOKEN in repository Actions secrets with Actions: write on Flobsterable/cosplay-dev-assistant (fine-grained token). The repository GITHUB_TOKEN cannot dispatch across repositories.');
+            }
+      - name: Send documentation task to the agent repository
+        uses: actions/github-script@v8
         with:
-          base: ${{ github.event.pull_request.base.ref || github.ref_name }}
-          branch: automation/docs-sync-${{ steps.range.outputs.head }}
-          add-paths: |
-            README.md
-            docs/**/*.md
-          commit-message: 'docs: update documentation from merged code'
-          title: 'docs: align documentation with merged code'
-          body: |
-            Documentation generated from ${{ steps.range.outputs.base }}..${{ steps.range.outputs.head }}.
-            The agent searched committed sources and their usages, read project docs, and saved documentation changes.
-            Re-run this range using workflow_dispatch with the same base/head SHA to update this PR.
-            Please check the documentation diff against the code before merging.
-          draft: true
+          github-token: ${{ secrets.AGENT_DISPATCH_TOKEN }}
+          script: |
+            const inputs = context.payload.inputs || {};
+            const branch = context.ref.replace(/^refs\/heads\//, '');
+            const base = inputs.base || context.payload.before;
+            const head = inputs.head || context.sha;
+            if (!['develop', 'main'].includes(branch) || !/^[a-f0-9]{40}$/.test(base || '') || !/^[a-f0-9]{40}$/.test(head || '')) {
+              core.setFailed('Documentation dispatch requires develop/main and full base/head commit SHAs.');
+              return;
+            }
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'Flobsterable', repo: 'cosplay-dev-assistant', workflow_id: 'agent.yml', ref: 'main',
+              inputs: { type: 'docs-sync', repository: context.repo.owner + '/' + context.repo.repo, base, head, branch }
+            });
+            core.notice('Documentation task sent. The agent repository tracks execution and recovery.');

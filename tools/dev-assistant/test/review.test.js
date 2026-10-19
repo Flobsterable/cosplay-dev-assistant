@@ -241,19 +241,19 @@ test('same changed location is reported once with all rule IDs and explanations 
 });
 
 
-test('inline reviews bind both diff sides and update only same-commit bot threads', async () => {
+test('inline reviews bind both diff sides and update only same-commit authenticated publisher threads', async () => {
   const { publishInlineReview } = await import('../src/review-github.js');
   const head = 'a'.repeat(40), comments = [], writes = []; let current = head;
   const fetchImpl = async (url, init) => {
     if (init.method === 'GET' && url.endsWith('/pulls/1')) return reply({ state:'open', head:{sha:current} });
     if (init.method === 'GET') return reply(comments);
     const data=JSON.parse(init.body); writes.push({url,method:init.method,data});
-    if (url.endsWith('/reviews')) for (const c of data.comments) comments.push({...c,id:comments.length+1,commit_id:data.commit_id,user:{login:'github-actions[bot]'}});
+    if (url.endsWith('/reviews')) for (const c of data.comments) comments.push({...c,id:comments.length+1,commit_id:data.commit_id,user:{login:'agent-service-owner'}});
     else comments.find(c=>url.endsWith('/'+c.id)).body=data.body;
     return reply({html_url:'https://github.com/o/r/pull/1#review'});
   };
   const f={path:'a.kt',side:'RIGHT',line:12,title:'Bug',body:'Risk',priority:'P1',rules:[{layer:'base',id:'B-CORRECTNESS'}]};
-  const args={repository:'o/r',number:1,head,findings:[f,{...f,side:'LEFT',line:4}],token:'fake',fetchImpl};
+  const args={repository:'o/r',number:1,head,findings:[f,{...f,side:'LEFT',line:4}],publisherLogin:'agent-service-owner',token:'fake',fetchImpl};
   await publishInlineReview(args);
   assert.equal(writes[0].data.body, undefined);
   assert.ok(writes[0].url.endsWith('/pulls/1/reviews'));

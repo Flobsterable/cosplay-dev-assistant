@@ -28,7 +28,7 @@ async function main() {
   if (result.usage) console.log('[llm_usage] ' + JSON.stringify(result.usage));
   if (flags.publish) {
     const inline = await publishInlineReview({ repository: flags.repo, number: Number(flags.pr), head: result.context.head,
-      findings: result.review.findings, token: process.env.GITHUB_TOKEN });
+      findings: result.review.findings, publisherLogin: process.env.REVIEW_PUBLISHER_LOGIN, token: process.env.GITHUB_TOKEN });
     console.log(inline.published ? `Inline-замечания: ${inline.comments} новых` : inline.reason);
   } else console.log(JSON.stringify(result.review.findings, null, 2));
   if (result.documentationAudit?.status === 'limit') {

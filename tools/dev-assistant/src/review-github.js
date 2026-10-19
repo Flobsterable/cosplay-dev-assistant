@@ -42,7 +42,7 @@ export async function publishReview({ repository, number, head, body, token, fet
 }
 
 // Findings have already passed validateReview against the actual changed lines.
-export async function publishInlineReview({ repository, number, head, findings, token, fetchImpl = fetch }) {
+export async function publishInlineReview({ repository, number, head, findings, publisherLogin = 'github-actions[bot]', token, fetchImpl = fetch }) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) || !Number.isSafeInteger(number) || number < 1 || !/^[a-f0-9]{40}$/i.test(head) || !token || !Array.isArray(findings) || findings.length > 15) throw new Error('Некорректные параметры inline-ревью.');
   for (const f of findings) {
     if (typeof f.path !== 'string' || !f.path || !['LEFT', 'RIGHT'].includes(f.side) || !Number.isInteger(f.line) || f.line < 1 || typeof f.title !== 'string' || typeof f.body !== 'string') throw new Error('Некорректная привязка inline-замечания.');
@@ -57,7 +57,7 @@ export async function publishInlineReview({ repository, number, head, findings, 
   const previous = [];
   for (let page = 1; page <= 10; page++) {
     const batch = await api(`/pulls/${number}/comments?per_page=100&page=${page}`);
-    previous.push(...batch.filter(c => c.user?.login === 'github-actions[bot]' && c.commit_id === head && c.body?.startsWith(stamp)));
+    previous.push(...batch.filter(c => c.user?.login === publisherLogin && c.commit_id === head && c.body?.startsWith(stamp)));
     if (batch.length < 100) break;
     if (page === 10) throw new Error('Слишком много inline-комментариев для безопасной публикации.');
   }

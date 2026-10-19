@@ -1,80 +1,60 @@
 name: AI code review
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
 permissions:
   contents: read
-  pull-requests: write
+  pull-requests: read
 concurrency:
-  group: ai-review-${{ github.event.pull_request.number }}
+  group: ai-review-dispatch-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 jobs:
   review:
     if: ${{ !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
-      - name: Checkout application base
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          path: project
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Fetch PR head as data
+      - name: Check dispatch credential
+        uses: actions/github-script@v8
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          case "$PR_NUMBER" in ''|*[!0-9]*) exit 1 ;; esac
-          git -C project fetch origin "+refs/pull/$PR_NUMBER/head:refs/remotes/origin/review-head"
-          test "$(git -C project rev-parse refs/remotes/origin/review-head)" = "$HEAD_SHA"
-      - name: Checkout trusted review runtime
-        uses: actions/checkout@v4
+          AGENT_DISPATCH_TOKEN: ${{ secrets.AGENT_DISPATCH_TOKEN }}
         with:
-          repository: Flobsterable/cosplay-dev-assistant
-          ref: 25152c0c10214a9f9dd829e3dd1a1113cdd3a51f
-          path: assistant
-          persist-credentials: false
-      - uses: actions/setup-node@v4
+          script: |
+            if (!process.env.AGENT_DISPATCH_TOKEN) {
+              core.setFailed('Save AGENT_DISPATCH_TOKEN in repository Actions secrets with Actions: write on Flobsterable/cosplay-dev-assistant (fine-grained token). The repository GITHUB_TOKEN cannot dispatch across repositories.');
+            }
+      - name: Inspect changed source metadata
+        id: source
+        uses: actions/github-script@v8
         with:
-          node-version: '24'
-          cache: npm
-          cache-dependency-path: assistant/tools/dev-assistant/package-lock.json
-      - name: Install trusted dependencies
-        run: npm ci --ignore-scripts
-        working-directory: assistant/tools/dev-assistant
-      - name: Review PR
-        env:
-          PROJECT_ROOT: ${{ github.workspace }}/project
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          LLM_SMALL_TASK_PROVIDER: gemini
-          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.5-flash-lite' }}
-          GEMINI_BASE_URL: ${{ vars.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai' }}
-          LLM_SMALL_TASK_MAX_INPUT_CHARACTERS: ${{ vars.LLM_SMALL_TASK_MAX_INPUT_CHARACTERS || '24000' }}
-          LLM_SMALL_TASK_MAX_OUTPUT_TOKENS: ${{ vars.LLM_SMALL_TASK_MAX_OUTPUT_TOKENS || '6000' }}
-          LLM_EXECUTION_MODE: economy
-          LLM_MAX_CALLS: ${{ vars.LLM_MAX_CALLS || '24' }}
-          LLM_MAX_INPUT_CHARACTERS: ${{ vars.LLM_MAX_INPUT_CHARACTERS || '1000000' }}
-          LLM_BASE_URL: ${{ vars.LLM_BASE_URL || 'https://api.deepseek.com' }}
-          LLM_MODEL: ${{ vars.LLM_MODEL || 'deepseek-flash' }}
-          GITHUB_TOKEN: ${{ github.token }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          if [ -z "$LLM_API_KEY" ] && [ -z "$GEMINI_API_KEY" ]; then
-            echo '::error::Set LLM_API_KEY or GEMINI_API_KEY in repository Actions secrets. Review was not performed.'
-            exit 1
-          fi
-          node assistant/tools/dev-assistant/src/review-cli.js --base "$BASE_SHA" --head "$HEAD_SHA" --repo "$REPOSITORY" --pr "$PR_NUMBER" --publish --output "$RUNNER_TEMP/ai-review"
-      - name: Save review diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
+          script: |
+            const pull = context.payload.pull_request;
+            if (!pull || pull.draft || pull.head.repo.full_name !== context.repo.owner + '/' + context.repo.repo) {
+              core.setOutput('changed', 'false');
+              core.notice('Draft or external PR: review task was not dispatched.');
+              return;
+            }
+            // Read metadata only; no application or PR code is executed.
+            const supported = path => /\.(kt|kts|toml|properties|xml)$/.test(path || '') || /^\.github\/workflows\/[^/]+\.ya?ml$/.test(path || '');
+            if (pull.changed_files <= 3000) {
+              const files = await github.paginate(github.rest.pulls.listFiles, { ...context.repo, pull_number: pull.number, per_page: 100 });
+              if (!files.some(file => supported(file.filename) || supported(file.previous_filename))) {
+                core.setOutput('changed', 'false');
+                core.notice('No supported source changes; no review task needed.');
+                return;
+              }
+            }
+            core.setOutput('changed', 'true');
+      - name: Send review task to the agent repository
+        if: steps.source.outputs.changed == 'true'
+        uses: actions/github-script@v8
         with:
-          name: ai-review-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/ai-review/review.json
-          if-no-files-found: ignore
-          retention-days: 14
+          github-token: ${{ secrets.AGENT_DISPATCH_TOKEN }}
+          script: |
+            const pull = context.payload.pull_request;
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'Flobsterable', repo: 'cosplay-dev-assistant', workflow_id: 'agent.yml', ref: 'main',
+              inputs: { type: 'review', repository: context.repo.owner + '/' + context.repo.repo,
+                base: pull.base.sha, head: pull.head.sha, pr: String(pull.number), branch: pull.base.ref }
+            });
+            core.notice('Review task sent. The agent repository tracks execution and publishes the result.');

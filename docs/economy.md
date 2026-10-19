@@ -69,7 +69,8 @@ LLM_EXECUTION_MODE=thorough; он значительно дороже и сох�
 Основная модель по-прежнему задаётся LLM_MODEL/LLM_BASE_URL/LLM_API_KEY.
 Для Gemini используется отдельный секрет GEMINI_API_KEY. Не вставляйте ключ
 в код, PR, issues или сообщения: в GitHub откройте Settings → Secrets and variables
-→ Actions → New repository secret и сохраните его как GEMINI_API_KEY.
+→ Actions → New repository secret в **cosplay-dev-assistant** и сохраните его как GEMINI_API_KEY.
+В приложении ключи LLM не нужны: оно [отправляет задачи агенту](agent-service.md).
 Локально ключ можно записать в tools/dev-assistant/.env, который не коммитится.
 
 LLM_SMALL_TASK_PROVIDER=gemini явно включает маршрутизацию небольших запросов.
