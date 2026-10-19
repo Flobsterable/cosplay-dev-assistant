@@ -205,3 +205,89 @@ test('late proposals for already reviewed documents stop before saving earlier a
   } }), /уже проверенной порции/);
   for (const [path, content] of Object.entries(originals)) assert.equal(await readFile(resolve(root, path), 'utf8'), content);
 });
+
+test('partial checker verdict retains two reviewed docs and checks only the other five without rerunning writer', async t => {
+  const { config, root, originals, mcp, base } = await fixture(t, false, actualPaths);
+  let writerCalls = 0, checkerCalls = 0, requests = 0;
+  const reviewed = ['README.md', 'docs/architecture.md'];
+  const simulate = model(tally());
+  const result = await syncDocs(config, mcp, base, { apply: true, fetchImpl: async (url, init) => {
+    requests++;
+    const body = JSON.parse(init.body), input = JSON.parse(body.messages[1].content);
+    // No target may be written while any required checker call is pending.
+    for (const [path, content] of Object.entries(originals)) assert.equal(await readFile(resolve(root, path), 'utf8'), content);
+    if (body.messages[0].content.startsWith('Ты docs_writer')) {
+      writerCalls++;
+      if (writerCalls === 1) return response({ summary: 'Describe city', updates: reviewed.map(path => ({ path,
+        edits: [{ old: originals[path].split('\n')[0], new: originals[path].split('\n')[0] + '\nClient.city stores the selected city.' }] })) });
+    } else {
+      checkerCalls++;
+      assert.deepEqual(input.requiredPaths, Object.keys(input.documents));
+      assert.match(body.messages[0].content, /а не только изменённые updates/);
+      assert.match(body.messages[0].content, /по его назначению/);
+      if (checkerCalls === 1) return response({ approved: true, reviewedPaths: reviewed, issues: [] });
+      if (checkerCalls === 2) {
+        assert.deepEqual(input.requiredPaths, actualPaths.slice(0, 7).filter(path => !reviewed.includes(path)));
+        assert.deepEqual(input.updates, []);
+        assert.equal(input.patch, '');
+        assert.deepEqual(input.documentCatalog.map(document => document.path), input.requiredPaths);
+      }
+    }
+    return simulate(url, init);
+  } });
+  assert.equal(writerCalls, result.plan.batches.length);
+  assert.equal(checkerCalls, result.plan.batches.length + 1);
+  assert.equal(requests, result.plan.expectedCalls + 1);
+  assert.equal(result.usage.apiCalls, requests);
+  assert.deepEqual(new Set(result.verification.reviewedPaths), new Set(actualPaths));
+  assert.equal(result.trace.filter(event => event.status === 'coverage').length, 1);
+  for (const path of reviewed) assert.match(await readFile(resolve(root, path), 'utf8'), /Client.city stores/);
+});
+
+test('an incomplete supplemental checker stops after one additional call without writing any docs', async t => {
+  const { config, root, originals, mcp, base } = await fixture(t, false, actualPaths);
+  let writerCalls = 0, checkerCalls = 0;
+  const simulate = model(tally());
+  await assert.rejects(syncDocs(config, mcp, base, { apply: true, fetchImpl: async (url, init) => {
+    const body = JSON.parse(init.body), input = JSON.parse(body.messages[1].content);
+    if (body.messages[0].content.startsWith('Ты docs_writer')) { writerCalls++; return simulate(url, init); }
+    checkerCalls++;
+    return response({ approved: true, reviewedPaths: input.requiredPaths.slice(0, 1), issues: [] });
+  } }), /неполный ответ проверяющего/);
+  assert.equal(writerCalls, 1);
+  assert.equal(checkerCalls, 2);
+  for (const [path, content] of Object.entries(originals)) assert.equal(await readFile(resolve(root, path), 'utf8'), content);
+});
+
+test('unknown duplicate and empty checker paths are rejected without a coverage retry', async t => {
+  const { config, root, originals, mcp, base } = await fixture(t, false, actualPaths);
+  for (const reviewedPaths of [['docs/nonexistent.md'], ['README.md', 'README.md'], []]) {
+    let requests = 0;
+    const simulate = model(tally());
+    await assert.rejects(syncDocs(config, mcp, base, { apply: true, fetchImpl: async (url, init) => {
+      requests++;
+      const body = JSON.parse(init.body);
+      return body.messages[0].content.startsWith('Ты docs_writer') ? simulate(url, init)
+        : response({ approved: true, reviewedPaths, issues: [] });
+    } }));
+    assert.equal(requests, 2);
+  }
+  for (const [path, content] of Object.entries(originals)) assert.equal(await readFile(resolve(root, path), 'utf8'), content);
+});
+
+test('supplemental checker respects shared budget and does not retry HTTP errors', async t => {
+  const { config, root, originals, mcp, base } = await fixture(t, false, actualPaths);
+  for (const bounded of [true, false]) {
+    let requests = 0;
+    const simulate = model(tally());
+    await assert.rejects(syncDocs({ ...config, ...(bounded ? { maxCalls: 2 } : {}) }, mcp, base, { apply: true, fetchImpl: async (url, init) => {
+      requests++;
+      const body = JSON.parse(init.body);
+      if (body.messages[0].content.startsWith('Ты docs_writer')) return simulate(url, init);
+      if (requests === 2) return response({ approved: true, reviewedPaths: ['README.md', 'docs/architecture.md'], issues: [] });
+      return new Response('billing', { status: 402 });
+    } }), error => bounded ? error.code === 'LLM_BUDGET_EXCEEDED' && error.usage.apiCalls === 2 : error.status === 402 && error.usage.apiCalls === 3);
+    assert.equal(requests, bounded ? 2 : 3);
+  }
+  for (const [path, content] of Object.entries(originals)) assert.equal(await readFile(resolve(root, path), 'utf8'), content);
+});

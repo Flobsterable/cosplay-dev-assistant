@@ -108,15 +108,40 @@ export async function syncEconomically(config, mcp, base, { apply = false, planO
         const proposal = validateUpdates(materializeDocEdits(scopedValue, documents), paths);
         proposed = proposal.updates.map(update => ({ path: update.path, content: update.content.replace(/\r\n/g, '\n').trimEnd() + '\n' }))
           .filter(update => update.content !== originals[update.path].replace(/\r\n/g, '\n'));
-        const patch = proposed.map(u => createTwoFilesPatch('a/' + u.path, 'b/' + u.path, originals[u.path].replace(/\r\n/g, '\n'), u.content)).join('\n');
         emit('docs_checker', 'running', paths.join(', '));
-        const checked = await groundedJSON(config, {
-          system: `Ты docs_checker — независимый проверяющий автора. ${policy} Проверь каждое новое утверждение по коду: API, параметры, команды, поведение. Проверь также, не пропущено ли необходимое дополнение в каждом документе (включая documents без updates). Не требуй описания внутренних классов и не документируй баг как норму. Существенное утверждение без подтверждения — причина отклонения. reviewedPaths должен содержать КАЖДЫЙ путь documents ровно один раз. Верни только JSON {"approved":true,"reviewedPaths":["путь"],"issues":[]}; при проблеме approved=false, issues=[{"path":"путь","reason":"конкретное противоречие или пропущенное изменение"}].`,
-          payload: { diff: changes.diff, documents, updates: proposed, patch },
-          index, sources: generated.sources, fetchImpl, onEvent, maxTokens: 3000
-        });
+        const checkDocuments = (requiredPaths, sources) => {
+          const selected = new Set(requiredPaths);
+          const selectedUpdates = proposed.filter(update => selected.has(update.path));
+          const selectedPatch = selectedUpdates.map(update => createTwoFilesPatch('a/' + update.path, 'b/' + update.path,
+            originals[update.path].replace(/\r\n/g, '\n'), update.content)).join('\n');
+          return groundedJSON(config, {
+            system: `Ты docs_checker — независимый проверяющий автора. ${policy} Обязательно проверь ВСЕ requiredPaths: ${JSON.stringify(requiredPaths)}, включая документы без updates. Проверь каждое новое утверждение по коду: API, параметры, команды, поведение. Проверяй полноту каждого документа по его назначению и заголовкам из documentCatalog. Другие документы проверяются отдельными порциями. Обзор, README и карта документации могут кратко описывать возможности и ссылаться на профильные руководства; не требуй дублировать в них все детали экранов, переходов и UI-состояний. Отмечай пропущенное дополнение только если оно необходимо для назначения именно этого документа. Не требуй описания внутренних классов и не документируй баг как норму. Существенное утверждение без подтверждения — причина отклонения. reviewedPaths должен содержать КАЖДЫЙ requiredPath ровно один раз, а не только изменённые updates. Верни только JSON {"approved":true,"reviewedPaths":["путь"],"issues":[]}; при проблеме approved=false, issues=[{"path":"путь","reason":"конкретное противоречие или пропущенное изменение по назначению документа"}].`,
+            payload: { diff: changes.diff, requiredPaths,
+              documents: Object.fromEntries(requiredPaths.map(path => [path, documents[path]])),
+              documentCatalog: documentCatalog.filter(document => selected.has(document.path)), updates: selectedUpdates, patch: selectedPatch },
+            index, sources, fetchImpl, onEvent, maxTokens: 3000
+          });
+        };
+        const checked = await checkDocuments(paths, generated.sources);
         batchSources = checked.sources;
-        const verification = validateDocsVerification(checked.value, paths);
+        const covered = checked.value?.reviewedPaths;
+        if (!Array.isArray(covered) || !covered.length || covered.some(path => !paths.includes(path))) {
+          throw new Error('Проверяющий документации вернул пустое покрытие или неизвестный путь.');
+        }
+        // A valid partial verdict proves only its explicit subset. Retain it and
+        // ask once for the remaining documents, without calling the writer again.
+        const partial = validateDocsVerification(checked.value, covered);
+        const missingPaths = paths.filter(path => !covered.includes(path));
+        let verification = partial;
+        if (missingPaths.length) {
+          emit('docs_checker', 'coverage', `Сохранено подтверждение ${covered.length} документов; проверяю только пропущенные: ${missingPaths.join(', ')}`);
+          const extra = await checkDocuments(missingPaths, checked.sources);
+          batchSources = extra.sources;
+          const remainder = validateDocsVerification(extra.value, missingPaths);
+          verification = { approved: partial.approved && remainder.approved,
+            reviewedPaths: [...partial.reviewedPaths, ...remainder.reviewedPaths], issues: [...partial.issues, ...remainder.issues] };
+        }
+        verification = validateDocsVerification(verification, paths);
         if (verification.approved) {
           for (const path of paths) deferredSuggestions.delete(path);
           reviewedPaths.push(...paths); summaries.push(proposal.summary); updates.push(...proposed); break;
