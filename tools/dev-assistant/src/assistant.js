@@ -1,5 +1,5 @@
 import { buildIndex, search } from './rag.js';
-import { executionConfig } from './config.js';
+import { executionConfig, smallModelConfig } from './config.js';
 import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -10,12 +10,13 @@ function newUsage() {
     cachedPromptTokens: 0, cacheMissTokens: 0, totalTokens: 0 };
 }
 export function createRunConfig(config) {
-  const copy = { ...config, ...executionConfig(config) };
+  const copy = { ...config, ...executionConfig(config), smallModel: smallModelConfig(config.smallModel) };
   runs.set(copy, newUsage());
   return copy;
 }
 export function usageSummary(config) {
-  return { ...(runs.get(config) || newUsage()) };
+  const usage = runs.get(config) || newUsage();
+  return { ...usage, ...(usage.perModel ? { perModel: Object.fromEntries(Object.entries(usage.perModel).map(([key, counters]) => [key, { ...counters }])) } : {}) };
 }
 
 function signed(config, value) {
@@ -53,28 +54,43 @@ export async function prepareQuestion(projectRoot, mcp, question) {
 
 export async function complete(config, messages, fetchImpl = fetch, json = false, maxTokens = 1400) {
   const limits = executionConfig(config);
-  if (!config.apiKey || !config.model) {
+  const small = smallModelConfig(config.smallModel);
+  if (small && !small.apiKey) {
+    const error = new Error('Для включённой маршрутизации Gemini задайте GEMINI_API_KEY до запуска.');
+    error.retryable = false;
+    throw error;
+  }
+  const inputCharacters = JSON.stringify(messages).length;
+  const useSmall = small && inputCharacters <= small.maxInputCharacters && maxTokens <= small.maxOutputTokens;
+  const selected = useSmall ? small : config;
+  if (!selected.apiKey || !selected.model) {
     throw new Error('Заполните LLM_API_KEY и LLM_MODEL в tools/dev-assistant/.env. Для проверки без ключа используйте --retrieve.');
   }
-  const url = new URL(config.baseUrl.replace(/\/$/, '') + '/chat/completions');
+  const url = new URL(selected.baseUrl.replace(/\/$/, '') + '/chat/completions');
   if (!['https:', 'http:'].includes(url.protocol)) throw new Error('LLM_BASE_URL должен быть HTTP(S) URL.');
   if (url.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) {
     throw new Error('Для внешнего API используйте HTTPS.');
   }
-  const inputCharacters = JSON.stringify(messages).length;
   if (!runs.has(config)) runs.set(config, newUsage());
   const usage = runs.get(config);
+  // Keep historical single-provider summaries stable; routing exposes the split.
+  const modelKey = `${useSmall ? 'gemini' : 'primary'}:${selected.model}`;
+  if (small && !usage.perModel) usage.perModel = Object.create(null);
+  if (small && !Object.hasOwn(usage.perModel, modelKey)) usage.perModel[modelKey] = newUsage();
+  const counters = small ? [usage, usage.perModel[modelKey]] : [usage];
+  const cacheConfig = { apiKey: selected.apiKey, cacheDir: config.cacheDir };
   const body = JSON.stringify({
-    model: config.model,
+    model: selected.model,
     ...(url.hostname === 'api.deepseek.com' ? { thinking: { type: 'disabled' } } : {}),
+    ...(useSmall && /^gemini-3\.5-flash-lite(?:$|-)/.test(selected.model) ? { reasoning_effort: 'minimal' } : {}),
     temperature: 0.2,
     max_tokens: maxTokens,
     ...(json ? { response_format: { type: 'json_object' } } : {}),
     messages
   });
-  const cacheKey = signed(config, `${url.href}\n${body}`);
-  const cached = await readCached(config, cacheKey);
-  if (cached !== null) { usage.cacheHits++; return cached; }
+  const cacheKey = signed(cacheConfig, `${url.href}\n${body}`);
+  const cached = await readCached(cacheConfig, cacheKey);
+  if (cached !== null) { for (const counter of counters) counter.cacheHits++; return cached; }
   if (usage.apiCalls >= limits.maxCalls || usage.inputCharacters + inputCharacters > limits.maxInputCharacters) {
     const error = new Error('Достигнут бюджет запуска LLM: число запросов или суммарный входной контекст. Ничего не обрезано; измените LLM_MAX_CALLS/LLM_MAX_INPUT_CHARACTERS явно.');
     error.code = 'LLM_BUDGET_EXCEEDED';
@@ -82,11 +98,10 @@ export async function complete(config, messages, fetchImpl = fetch, json = false
     throw error;
   }
   // Reserve before awaiting so concurrent subagents share the same spend guard.
-  usage.apiCalls++;
-  usage.inputCharacters += inputCharacters;
+  for (const counter of counters) { counter.apiCalls++; counter.inputCharacters += inputCharacters; }
   const response = await fetchImpl(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${selected.apiKey}` },
     signal: AbortSignal.timeout(60000),
     body
   });
@@ -99,11 +114,13 @@ export async function complete(config, messages, fetchImpl = fetch, json = false
   const data = await response.json();
   const measured = data.usage || {};
   const count = value => Number.isFinite(value) && value >= 0 ? value : 0;
-  usage.promptTokens += count(measured.prompt_tokens);
-  usage.completionTokens += count(measured.completion_tokens);
-  usage.cachedPromptTokens += count(measured.prompt_cache_hit_tokens ?? measured.prompt_tokens_details?.cached_tokens);
-  usage.cacheMissTokens += count(measured.prompt_cache_miss_tokens);
-  usage.totalTokens += count(measured.total_tokens ?? (count(measured.prompt_tokens) + count(measured.completion_tokens)));
+  for (const counter of counters) {
+    counter.promptTokens += count(measured.prompt_tokens);
+    counter.completionTokens += count(measured.completion_tokens);
+    counter.cachedPromptTokens += count(measured.prompt_cache_hit_tokens ?? measured.prompt_tokens_details?.cached_tokens);
+    counter.cacheMissTokens += count(measured.prompt_cache_miss_tokens);
+    counter.totalTokens += count(measured.total_tokens ?? (count(measured.prompt_tokens) + count(measured.completion_tokens)));
+  }
   if (data.choices?.[0]?.finish_reason === 'length') throw new Error('Ответ модели обрезан лимитом токенов. Уменьшите задачу или диапазон diff.');
   const answer = data.choices?.[0]?.message?.content;
   if (typeof answer !== 'string' || !answer.trim()) throw new Error('API модели вернул пустой ответ.');
@@ -113,7 +130,7 @@ export async function complete(config, messages, fetchImpl = fetch, json = false
     try { const value = JSON.parse(answer); cacheable = value !== null && typeof value === 'object' && !Array.isArray(value); }
     catch { cacheable = false; }
   }
-  if (cacheable) await saveCached(config, cacheKey, answer);
+  if (cacheable) await saveCached(cacheConfig, cacheKey, answer);
   return answer;
 }
 

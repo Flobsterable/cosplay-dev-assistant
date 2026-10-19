@@ -21,7 +21,10 @@ async function main() {
     if (args[0] === '--doctor') {
       const index = await buildIndex(config.projectRoot);
       const tools = (await mcp.client.listTools()).tools.map(tool => tool.name);
-      console.log(JSON.stringify({ node: process.version, project: config.projectRoot, documents: index.documents, chunks: index.chunks.length, tools, mcp: await mcp.context(), modelConfigured: Boolean(config.apiKey && config.model) }, null, 2));
+      console.log(JSON.stringify({ node: process.version, project: config.projectRoot, documents: index.documents, chunks: index.chunks.length, tools, mcp: await mcp.context(), modelConfigured: Boolean((config.apiKey && config.model) || (config.smallModel?.apiKey && config.smallModel?.model)),
+        routing: { primary: { model: config.model, configured: Boolean(config.apiKey && config.model) },
+          small: config.smallModel ? { provider: config.smallModel.provider, model: config.smallModel.model, configured: Boolean(config.smallModel.apiKey),
+            maxInputCharacters: config.smallModel.maxInputCharacters, maxOutputTokens: config.smallModel.maxOutputTokens } : null } }, null, 2));
       return;
     }
     async function ask(input, retrieve = false) {

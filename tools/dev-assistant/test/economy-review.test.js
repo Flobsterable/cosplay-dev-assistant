@@ -177,3 +177,23 @@ test('on-demand source reads preserve canonical citations when earlier sections 
   assert.equal(calls, 3);
   assert.equal(result.sources[result.review.findings[0].sources[0] - 1].path, 'head:Main.kt');
 });
+
+test('a small real Git review and its independent verifier both route to Gemini', async t => {
+  const { config, base, head } = await fixture(t);
+  let calls = 0;
+  const result = await reviewEconomically({ ...config, apiKey: '', model: '', smallModel: { provider: 'gemini', apiKey: 'gemini-only-fixture' } }, {
+    base, head, fetchImpl: async (url, init) => {
+      calls++;
+      assert.equal(url.hostname, 'generativelanguage.googleapis.com');
+      assert.equal(init.headers.Authorization, 'Bearer gemini-only-fixture');
+      const body = JSON.parse(init.body), input = JSON.parse(body.messages[1].content);
+      assert.equal(body.model, 'gemini-3.5-flash-lite');
+      if (input.draft) return modelReply({ acceptedDraftIds: [1] });
+      return modelReply({ summary: 'Regression', findings: [finding(input.sources.find(source => source.path === 'head:Main.kt').sectionId)] });
+    }
+  });
+  assert.equal(calls, 2);
+  assert.equal(result.review.findings.length, 1);
+  assert.equal(result.usage.perModel['gemini:gemini-3.5-flash-lite'].apiCalls, 2);
+  assert.equal(result.usage.apiCalls, 2);
+});
