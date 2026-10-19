@@ -70,11 +70,11 @@ jobs:
             exit 1
           fi
           node assistant/tools/dev-assistant/src/review-cli.js --base "$BASE_SHA" --head "$HEAD_SHA" --repo "$REPOSITORY" --pr "$PR_NUMBER" --publish --output "$RUNNER_TEMP/ai-review"
-      - name: Save review report
+      - name: Save review diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ai-review-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/ai-review/
+          path: ${{ runner.temp }}/ai-review/review.json
           if-no-files-found: ignore
           retention-days: 14

@@ -42,7 +42,7 @@ export async function publishReview({ repository, number, head, body, token, fet
 }
 
 // Findings have already passed validateReview against the actual changed lines.
-export async function publishInlineReview({ repository, number, head, findings, summaryUrl, token, fetchImpl = fetch }) {
+export async function publishInlineReview({ repository, number, head, findings, token, fetchImpl = fetch }) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) || !Number.isSafeInteger(number) || number < 1 || !/^[a-f0-9]{40}$/i.test(head) || !token || !Array.isArray(findings) || findings.length > 15) throw new Error('Некорректные параметры inline-ревью.');
   for (const f of findings) {
     if (typeof f.path !== 'string' || !f.path || !['LEFT', 'RIGHT'].includes(f.side) || !Number.isInteger(f.line) || f.line < 1 || typeof f.title !== 'string' || typeof f.body !== 'string') throw new Error('Некорректная привязка inline-замечания.');
@@ -66,7 +66,7 @@ export async function publishInlineReview({ repository, number, head, findings, 
   const pending = [];
   const matched = new Set();
   for (const f of findings) {
-    const body = `${stamp}\n**[${clean(f.priority)}] ${clean(f.title)}**\n\n${clean(f.body)}\n\nПравила: ${clean(f.rules.map(r => `${r.layer}/${r.id}`).join(', '))}.\n\n[Полный отчёт и источники](${summaryUrl})`;
+    const body = `${stamp}\n**[${clean(f.priority)}] ${clean(f.title)}**\n\n${clean(f.body)}\n\nПравила: ${clean(f.rules.map(r => `${r.layer}/${r.id}`).join(', '))}.`;
     const old = previous.find(c => key(c) === key(f));
     if (old) {
       matched.add(old.id);
@@ -79,12 +79,12 @@ export async function publishInlineReview({ repository, number, head, findings, 
   for (const old of previous.filter(c => !matched.has(c.id))) {
     if (old.body.includes('<!-- no-longer-confirmed -->')) continue;
     if (!await current()) return { published: false, reason: 'PR изменился; дальнейшая публикация пропущена.' };
-    await api(`/pulls/comments/${old.id}`, 'PATCH', { body: old.body + '\n\n<!-- no-longer-confirmed -->\nПовторная проверка этого коммита не подтвердила замечание. См. актуальный полный отчёт.' });
+    await api(`/pulls/comments/${old.id}`, 'PATCH', { body: old.body + '\n\n<!-- no-longer-confirmed -->\nПовторная проверка этого коммита не подтвердила замечание.' });
   }
   if (pending.length) {
     if (!await current()) return { published: false, reason: 'PR изменился; inline-ревью пропущено.' };
     const review = await api(`/pulls/${number}/reviews`, 'POST', {
-      commit_id: head, event: 'COMMENT', body: `${stamp}\nAI-ревью коммита ${head.slice(0, 7)}: замечания к изменённым строкам.\n\n[Полный отчёт](${summaryUrl})`, comments: pending
+      commit_id: head, event: 'COMMENT', comments: pending
     });
     return { published: true, url: review.html_url, comments: pending.length };
   }
