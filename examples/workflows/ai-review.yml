@@ -33,7 +33,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Flobsterable/cosplay-dev-assistant
-          ref: b8a24ccabc398f9c2d6ba6e9774b2831ecd4ef1e
+          ref: 34d437d5c03e90cec43703c5b49659f750324fc6
           path: assistant
           persist-credentials: false
       - uses: actions/setup-node@v4
@@ -48,6 +48,9 @@ jobs:
         env:
           PROJECT_ROOT: ${{ github.workspace }}/project
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_EXECUTION_MODE: economy
+          LLM_MAX_CALLS: ${{ vars.LLM_MAX_CALLS || '24' }}
+          LLM_MAX_INPUT_CHARACTERS: ${{ vars.LLM_MAX_INPUT_CHARACTERS || '1000000' }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL || 'https://api.deepseek.com' }}
           LLM_MODEL: ${{ vars.LLM_MODEL || 'deepseek-flash' }}
           GITHUB_TOKEN: ${{ github.token }}
