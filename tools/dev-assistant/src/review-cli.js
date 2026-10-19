@@ -1,8 +1,8 @@
-import { mkdir, writeFile, appendFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { loadConfig } from './config.js';
-import { reviewPullRequest, renderReview } from './pr-review.js';
-import { publishReview, publishInlineReview } from './review-github.js';
+import { reviewPullRequest } from './pr-review.js';
+import { publishInlineReview } from './review-github.js';
 
 async function main() {
   const flags = {};
@@ -16,10 +16,8 @@ async function main() {
   const config = loadConfig();
   const result = await reviewPullRequest(config, { base: flags.base, head: flags.head,
     onEvent: e => console.log(`[${e.agent}] ${e.status}: ${e.detail}`) });
-  const body = renderReview(result, flags.repo);
   const output = resolve(flags.output || 'review-output');
   await mkdir(output, { recursive: true });
-  await writeFile(resolve(output, 'review.md'), body + '\n');
   // Keep provenance/coverage, not raw source, prompts, or credentials, in artifacts.
   await writeFile(resolve(output, 'review.json'), JSON.stringify({ review: result.review, layers: result.layers,
     documentationAudit: result.documentationAudit ? { ...result.documentationAudit,
@@ -28,18 +26,13 @@ async function main() {
     files: result.context.files, omitted: result.context.omitted, retrieval: result.retrieval,
     sources: result.sources.map(({ text, tokens, ...s }) => s) }, null, 2) + '\n');
   if (result.usage) console.log('[llm_usage] ' + JSON.stringify(result.usage));
-  if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, body + '\n');
   if (flags.publish) {
-    const published = await publishReview({ repository: flags.repo, number: Number(flags.pr), head: result.context.head, body, token: process.env.GITHUB_TOKEN });
-    console.log(published.published ? `Ревью опубликовано: ${published.url}` : published.reason);
-    if (published.published) {
-      const inline = await publishInlineReview({ repository: flags.repo, number: Number(flags.pr), head: result.context.head,
-        findings: result.review.findings, summaryUrl: published.url, token: process.env.GITHUB_TOKEN });
-      console.log(inline.published ? `Inline-замечания опубликованы: ${inline.comments} новых` : inline.reason);
-    }
-  } else console.log(body);
+    const inline = await publishInlineReview({ repository: flags.repo, number: Number(flags.pr), head: result.context.head,
+      findings: result.review.findings, publisherLogin: process.env.REVIEW_PUBLISHER_LOGIN, token: process.env.GITHUB_TOKEN });
+    console.log(inline.published ? `Inline-замечания: ${inline.comments} новых` : inline.reason);
+  } else console.log(JSON.stringify(result.review.findings, null, 2));
   if (result.documentationAudit?.status === 'limit') {
-    console.error('Аудит документации не завершён. Причина и непрочитанные разделы указаны в review.md/review.json; проверка не считается успешной.');
+    console.error('Аудит документации не завершён. Причина и непрочитанные разделы указаны в review.json; проверка не считается успешной.');
     process.exitCode = 1;
   }
 }

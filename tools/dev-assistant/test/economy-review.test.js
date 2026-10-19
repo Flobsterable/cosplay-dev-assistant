@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -55,7 +55,8 @@ test('economy review with no findings uses one API request and defers documentat
     assert.match(body.messages[0].content, /P-CONTRACT/);
     assert.ok(input.sources.some(source => source.path === 'head:Main.kt'));
     assert.ok(!init.body.includes('UNRELATED_SENTINEL'));
-    return modelReply({ summary: 'No issues', findings: [] });
+    assert.ok(!body.messages[0].content.includes('краткий итог'));
+    return modelReply({ findings: [] });
   } });
   assert.equal(calls, 1);
   assert.equal(result.usage.apiCalls, 1);
@@ -196,4 +197,20 @@ test('a small real Git review and its independent verifier both route to Gemini'
   assert.equal(result.review.findings.length, 1);
   assert.equal(result.usage.perModel['gemini:gemini-3.5-flash-lite'].apiCalls, 2);
   assert.equal(result.usage.apiCalls, 2);
+});
+
+
+test('review CLI emits JSON diagnostics without a Markdown report or Actions summary', async t => {
+  const { config, head } = await fixture(t);
+  const output = resolve(config.projectRoot, 'diagnostics');
+  const summary = resolve(config.projectRoot, 'step-summary');
+  await writeFile(summary, 'existing summary');
+  const { fileURLToPath } = await import('node:url');
+  const result = await exec(process.execPath, [fileURLToPath(new URL('../src/review-cli.js', import.meta.url)), '--base', head, '--head', head,
+    '--repo', 'o/r', '--output', output], { env: { ...process.env,
+      PROJECT_ROOT: config.projectRoot, GITHUB_STEP_SUMMARY: summary, LLM_EXECUTION_MODE: 'economy' } });
+  assert.deepEqual(await readdir(output), ['review.json']);
+  assert.equal(await readFile(summary, 'utf8'), 'existing summary');
+  assert.deepEqual(JSON.parse(await readFile(resolve(output, 'review.json'), 'utf8')).review.findings, []);
+  assert.ok(!result.stdout.includes('AI-ревью ·'));
 });

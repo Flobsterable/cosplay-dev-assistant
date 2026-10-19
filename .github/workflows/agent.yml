@@ -1,0 +1,205 @@
+name: Agent service
+
+on:
+  workflow_dispatch:
+    inputs:
+      type:
+        type: choice
+        options: [review, docs-sync]
+        required: true
+      repository:
+        description: Project owner/name
+        default: Flobsterable/cosplay-2
+        required: true
+      base:
+        description: Full base SHA
+        required: true
+      head:
+        description: Full source head SHA
+        required: true
+      branch:
+        description: Target branch
+        default: develop
+        required: true
+      pr:
+        description: Pull request number (review only)
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-${{ inputs.type }}-${{ inputs.repository }}-${{ inputs.pr || inputs.branch }}
+  queue: max
+  cancel-in-progress: false
+
+jobs:
+  request:
+    # Never load service credentials into a manually selected feature branch.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      kind: ${{ steps.request.outputs.kind }}
+      repository: ${{ steps.request.outputs.repository }}
+      base: ${{ steps.request.outputs.base }}
+      head: ${{ steps.request.outputs.head }}
+      branch: ${{ steps.request.outputs.branch }}
+      pr: ${{ steps.request.outputs.pr }}
+      checkout: ${{ steps.request.outputs.checkout }}
+      skip: ${{ steps.request.outputs.skip }}
+      publisher: ${{ steps.request.outputs.publisher }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Validate request against project metadata
+        id: request
+        env:
+          PROJECT_GITHUB_TOKEN: ${{ secrets.PROJECT_GITHUB_TOKEN }}
+          AGENT_PROJECTS: ${{ vars.AGENT_PROJECTS || 'Flobsterable/cosplay-2' }}
+        run: node .github/scripts/agent-request.cjs prepare
+
+  execute:
+    needs: request
+    if: needs.request.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PROJECT_REPOSITORY: ${{ needs.request.outputs.repository }}
+      BASE_SHA: ${{ needs.request.outputs.base }}
+      MERGED_SHA: ${{ needs.request.outputs.head }}
+      TARGET_BRANCH: ${{ needs.request.outputs.branch }}
+      PR_NUMBER: ${{ needs.request.outputs.pr }}
+      LLM_EXECUTION_MODE: economy
+      LLM_SMALL_TASK_PROVIDER: gemini
+      GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.5-flash-lite' }}
+      GEMINI_BASE_URL: ${{ vars.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai' }}
+      LLM_SMALL_TASK_MAX_INPUT_CHARACTERS: ${{ vars.LLM_SMALL_TASK_MAX_INPUT_CHARACTERS || '24000' }}
+      LLM_SMALL_TASK_MAX_OUTPUT_TOKENS: ${{ vars.LLM_SMALL_TASK_MAX_OUTPUT_TOKENS || '6000' }}
+      LLM_MAX_CALLS: ${{ vars.LLM_MAX_CALLS || '24' }}
+      LLM_MAX_INPUT_CHARACTERS: ${{ vars.LLM_MAX_INPUT_CHARACTERS || '1000000' }}
+      LLM_MODEL: ${{ vars.LLM_MODEL || 'deepseek-flash' }}
+      LLM_BASE_URL: ${{ vars.LLM_BASE_URL || 'https://api.deepseek.com' }}
+      PROJECT_ROOT: ${{ github.workspace }}/project
+      ASSISTANT_ROOT: ${{ github.workspace }}/assistant
+    steps:
+      - name: Checkout trusted agent, never project tooling
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: assistant
+          persist-credentials: false
+      - name: Check service credentials before model calls
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PROJECT_GITHUB_TOKEN: ${{ secrets.PROJECT_GITHUB_TOKEN }}
+        run: |
+          test -n "$GEMINI_API_KEY" || { echo '::error::Set GEMINI_API_KEY in cosplay-dev-assistant Actions secrets.'; exit 1; }
+          test -n "$PROJECT_GITHUB_TOKEN" || { echo '::error::Set PROJECT_GITHUB_TOKEN in cosplay-dev-assistant Actions secrets.'; exit 1; }
+      - name: Checkout project as data
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.request.outputs.repository }}
+          ref: ${{ needs.request.outputs.checkout }}
+          token: ${{ secrets.PROJECT_GITHUB_TOKEN }}
+          fetch-depth: 0
+          path: project
+          persist-credentials: ${{ needs.request.outputs.kind == 'docs-sync' }}
+      - name: Validate Git range
+        working-directory: project
+        run: |
+          set -euo pipefail
+          git cat-file -e "$BASE_SHA^{commit}"
+          git cat-file -e "$MERGED_SHA^{commit}"
+          if [ '${{ needs.request.outputs.kind }}' = 'docs-sync' ]; then
+            git merge-base --is-ancestor "$BASE_SHA" "$MERGED_SHA"
+            git merge-base --is-ancestor "$MERGED_SHA" HEAD
+          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: assistant/tools/dev-assistant/package-lock.json
+      - name: Install trusted agent dependencies
+        working-directory: assistant/tools/dev-assistant
+        run: npm ci --ignore-scripts
+      - name: Compute response cache configuration
+        id: config
+        run: |
+          node -e "const keys = ['LLM_MODEL', 'LLM_BASE_URL', 'LLM_EXECUTION_MODE', 'LLM_MAX_CALLS', 'LLM_MAX_INPUT_CHARACTERS', 'LLM_SMALL_TASK_PROVIDER', 'GEMINI_MODEL', 'GEMINI_BASE_URL', 'LLM_SMALL_TASK_MAX_INPUT_CHARACTERS', 'LLM_SMALL_TASK_MAX_OUTPUT_TOKENS', 'PROJECT_REPOSITORY']; const hash = require('node:crypto').createHash('sha256').update(JSON.stringify(keys.map(k => process.env[k] || ''))).digest('hex'); require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, 'hash=' + hash + '\n');"
+      - name: Restore signed model responses
+        id: responses
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/assistant-cache
+          key: service-responses-v1-${{ github.sha }}-${{ steps.config.outputs.hash }}-${{ needs.request.outputs.kind }}-${{ needs.request.outputs.base }}-${{ needs.request.outputs.head }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            service-responses-v1-${{ github.sha }}-${{ steps.config.outputs.hash }}-${{ needs.request.outputs.kind }}-${{ needs.request.outputs.base }}-${{ needs.request.outputs.head }}-
+            service-responses-v1-${{ github.sha }}-${{ steps.config.outputs.hash }}-
+      - name: Review code with inline comments only
+        if: needs.request.outputs.kind == 'review'
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.PROJECT_GITHUB_TOKEN }}
+          REVIEW_PUBLISHER_LOGIN: ${{ needs.request.outputs.publisher }}
+          LLM_CACHE_DIR: ${{ runner.temp }}/assistant-cache
+        run: node assistant/tools/dev-assistant/src/review-cli.js --base "$BASE_SHA" --head "$MERGED_SHA" --repo "$PROJECT_REPOSITORY" --pr "$PR_NUMBER" --publish --output "$RUNNER_TEMP/ai-review"
+      - name: Generate, verify and commit documentation
+        if: needs.request.outputs.kind == 'docs-sync'
+        working-directory: project
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          LLM_CACHE_DIR: ${{ runner.temp }}/assistant-cache
+        run: bash "$ASSISTANT_ROOT/.github/scripts/docs-sync-run.sh"
+      - name: Preserve responses after success or failure
+        if: ${{ always() && steps.responses.outcome == 'success' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/assistant-cache
+          key: ${{ steps.responses.outputs.cache-primary-key }}
+      - name: Save diagnostics and recoverable documentation patch
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/ai-review/review.json
+            ${{ runner.temp }}/docs-sync-generation.txt
+            ${{ runner.temp }}/docs-sync-generated.patch
+          if-no-files-found: ignore
+          retention-days: 14
+
+  status:
+    needs: [request, execute]
+    if: ${{ always() && needs.request.result == 'success' && needs.request.outputs.skip == 'false' && needs.request.outputs.kind == 'docs-sync' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: agent-docs-status-${{ needs.request.outputs.repository }}-${{ needs.request.outputs.branch }}-${{ needs.request.outputs.head }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Track documentation recovery in target project
+        env:
+          PROJECT_GITHUB_TOKEN: ${{ secrets.PROJECT_GITHUB_TOKEN }}
+          AGENT_PROJECTS: ${{ vars.AGENT_PROJECTS || 'Flobsterable/cosplay-2' }}
+          REQUEST_KIND: docs-sync
+          REQUEST_REPOSITORY: ${{ needs.request.outputs.repository }}
+          REQUEST_BASE: ${{ needs.request.outputs.base }}
+          REQUEST_HEAD: ${{ needs.request.outputs.head }}
+          REQUEST_BRANCH: ${{ needs.request.outputs.branch }}
+          SYNC_RESULT: ${{ needs.execute.result }}
+        run: node .github/scripts/agent-request.cjs status

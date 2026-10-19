@@ -241,20 +241,23 @@ test('same changed location is reported once with all rule IDs and explanations 
 });
 
 
-test('inline reviews bind both diff sides and update only same-commit bot threads', async () => {
+test('inline reviews bind both diff sides and update only same-commit authenticated publisher threads', async () => {
   const { publishInlineReview } = await import('../src/review-github.js');
   const head = 'a'.repeat(40), comments = [], writes = []; let current = head;
   const fetchImpl = async (url, init) => {
     if (init.method === 'GET' && url.endsWith('/pulls/1')) return reply({ state:'open', head:{sha:current} });
     if (init.method === 'GET') return reply(comments);
     const data=JSON.parse(init.body); writes.push({url,method:init.method,data});
-    if (url.endsWith('/reviews')) for (const c of data.comments) comments.push({...c,id:comments.length+1,commit_id:data.commit_id,user:{login:'github-actions[bot]'}});
+    if (url.endsWith('/reviews')) for (const c of data.comments) comments.push({...c,id:comments.length+1,commit_id:data.commit_id,user:{login:'agent-service-owner'}});
     else comments.find(c=>url.endsWith('/'+c.id)).body=data.body;
     return reply({html_url:'https://github.com/o/r/pull/1#review'});
   };
   const f={path:'a.kt',side:'RIGHT',line:12,title:'Bug',body:'Risk',priority:'P1',rules:[{layer:'base',id:'B-CORRECTNESS'}]};
-  const args={repository:'o/r',number:1,head,findings:[f,{...f,side:'LEFT',line:4}],summaryUrl:'https://github.com/o/r/pull/1#report',token:'fake',fetchImpl};
+  const args={repository:'o/r',number:1,head,findings:[f,{...f,side:'LEFT',line:4}],publisherLogin:'agent-service-owner',token:'fake',fetchImpl};
   await publishInlineReview(args);
+  assert.equal(writes[0].data.body, undefined);
+  assert.ok(writes[0].url.endsWith('/pulls/1/reviews'));
+  assert.ok(writes[0].data.comments.every(c => !/Полный отчёт|undefined/.test(c.body)));
   assert.equal(writes[0].data.event,'COMMENT'); assert.equal(writes[0].data.commit_id,head);
   assert.deepEqual(writes[0].data.comments.map(c=>[c.path,c.side,c.line]),[['a.kt','RIGHT',12],['a.kt','LEFT',4]]);
   await publishInlineReview(args); assert.equal(writes.length,1);
@@ -268,7 +271,20 @@ test('inline reviews bind both diff sides and update only same-commit bot thread
 
 test('inline publication skips writes when PR head changes after pagination', async () => {
   const { publishInlineReview }=await import('../src/review-github.js'); let reads=0;
-  const result=await publishInlineReview({repository:'o/r',number:1,head:'a'.repeat(40),token:'fake',summaryUrl:'https://github.com/o/r/pull/1',findings:[{path:'a.kt',side:'RIGHT',line:1,title:'Bug',body:'Risk',priority:'P1',rules:[]}],
+  const result=await publishInlineReview({repository:'o/r',number:1,head:'a'.repeat(40),token:'fake',findings:[{path:'a.kt',side:'RIGHT',line:1,title:'Bug',body:'Risk',priority:'P1',rules:[]}],
     fetchImpl:async(url,init)=>{ assert.equal(init.method,'GET'); if(url.includes('/comments?'))return reply([]);return reply({state:'open',head:{sha:++reads===1?'a'.repeat(40):'b'.repeat(40)}}); }
   }); assert.equal(result.published,false);
+});
+
+
+test('no findings publish neither a summary nor an empty review', async () => {
+  const { publishInlineReview } = await import('../src/review-github.js');
+  const head = 'a'.repeat(40);
+  const result = await publishInlineReview({repository:'o/r', number:1, head, findings:[], token:'fake',
+    fetchImpl: async (url, init) => {
+      assert.equal(init.method, 'GET');
+      assert.ok(!url.includes('/issues/'));
+      return reply(url.includes('/comments?') ? [] : {state:'open',head:{sha:head}});
+    } });
+  assert.equal(result.comments, 0);
 });
