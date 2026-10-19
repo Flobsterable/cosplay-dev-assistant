@@ -11,12 +11,17 @@ import { connectProject } from '../src/mcp-client.js';
 
 const exec = promisify(execFile);
 const response = value => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(value) }, finish_reason: 'stop' }] }));
-async function fixture(t, extraSources = false) {
+async function fixture(t, extraSources = false, documentPaths = null) {
   const root = await mkdtemp(resolve(tmpdir(), 'economy-docs-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(resolve(root, 'docs'));
-  const originals = { 'README.md': '# App\n\n' + 'Application guide.\n'.repeat(260) };
-  for (let i = 0; i < 14; i++) originals[`docs/guide-${String(i).padStart(2, '0')}.md`] = `# Guide ${i}\n\n` + 'Existing documentation.\n'.repeat(200);
+  const originals = {};
+  if (documentPaths) {
+    for (const [i, path] of documentPaths.entries()) originals[path] = `# Guide ${i}\n\n` + 'Existing documentation.\n'.repeat(i < 7 ? 120 : 300);
+  } else {
+    originals['README.md'] = '# App\n\n' + 'Application guide.\n'.repeat(260);
+    for (let i = 0; i < 14; i++) originals[`docs/guide-${String(i).padStart(2, '0')}.md`] = `# Guide ${i}\n\n` + 'Existing documentation.\n'.repeat(200);
+  }
   for (const [path, content] of Object.entries(originals)) await writeFile(resolve(root, path), content);
   await writeFile(resolve(root, 'Client.kt'), 'class Client\n');
   if (extraSources) for (let i = 0; i < 20; i++) await writeFile(resolve(root, 'Proof' + i + '.kt'), 'class Proof' + i + ' { val explanation = \"independent contract\" }\n');
@@ -119,4 +124,84 @@ test('plan-only reads real files and reports all batches without model calls or 
   assert.deepEqual(result.plan.batches.flat(), Object.keys(originals));
   assert.equal(result.plan.expectedCalls, result.plan.batches.length * 2);
   assert.equal(result.updates.length, 0);
+});
+
+const actualPaths = ['README.md', 'docs/README.md', 'docs/ai-review.md', 'docs/architecture.md', 'docs/data-model.md',
+  'docs/dev-assistant.md', 'docs/development.md', 'docs/feature-flows.md', 'docs/features.md', 'docs/screens.md'];
+
+test('known future-batch proposals are deferred locally with no paid repair and every document is checked', async t => {
+  const { config, root, originals, mcp, base } = await fixture(t, false, actualPaths);
+  const current = tally(), events = [], futureReceived = new Set();
+  const simulate = model(current);
+  let writerCalls = 0, requests = 0;
+  const result = await syncDocs(config, mcp, base, { apply: true, onEvent: event => events.push(event), fetchImpl: async (url, init) => {
+    requests++;
+    const body = JSON.parse(init.body), input = JSON.parse(body.messages[1].content);
+    if (body.messages[0].content.startsWith('Ты docs_writer')) {
+      writerCalls++;
+      assert.deepEqual(input.allowedPaths, Object.keys(input.documents));
+      assert.match(body.messages[0].content, /documentCatalog — справочник/);
+      if (writerCalls === 1) {
+        assert.deepEqual(input.allowedPaths, actualPaths.slice(0, 7));
+        return response({ summary: 'Document city in relevant guides', updates: ['README.md', 'docs/features.md', 'docs/screens.md', 'docs/feature-flows.md'].map(path => ({ path,
+          edits: [{ old: originals[path].split('\n')[0], new: originals[path].split('\n')[0] + '\nClient.city stores the selected city.' }] })) });
+      }
+      for (const update of input.deferredSuggestions || []) {
+        assert.ok(input.allowedPaths.includes(update.path));
+        futureReceived.add(update.path);
+      }
+    }
+    return simulate(url, init);
+  } });
+  assert.equal(requests, result.plan.expectedCalls);
+  assert.equal(result.usage.apiCalls, requests);
+  assert.deepEqual(futureReceived, new Set(['docs/features.md', 'docs/screens.md', 'docs/feature-flows.md']));
+  assert.deepEqual(current.checked, new Set(actualPaths));
+  assert.equal(result.verification.reviewedPaths.length, actualPaths.length);
+  assert.equal(events.filter(event => event.status === 'deferred').length, 3);
+  assert.equal(result.updates.length, 4);
+  for (const path of ['docs/features.md', 'docs/screens.md', 'docs/feature-flows.md']) assert.match(await readFile(resolve(root, path), 'utf8'), /Client.city stores/);
+  assert.equal(await readFile(resolve(root, 'docs/architecture.md'), 'utf8'), originals['docs/architecture.md']);
+});
+
+test('unknown or traversal paths and malformed current edits are rejected before any document write', async t => {
+  const { config, root, originals, mcp, base } = await fixture(t);
+  for (const update of [
+    { path: '../../README.md', edits: [] },
+    { path: 'docs/nonexistent.md', edits: [] },
+    { path: 'README.md', edits: [{ old: 'no such original fragment', new: 'new claim' }] }
+  ]) {
+    let requests = 0;
+    await assert.rejects(syncDocs(config, mcp, base, { apply: true, fetchImpl: async () => {
+      requests++;
+      return response({ summary: 'invalid', updates: [update] });
+    } }));
+    assert.equal(requests, 1);
+  }
+  for (const [path, content] of Object.entries(originals)) assert.equal(await readFile(resolve(root, path), 'utf8'), content);
+});
+
+test('deferred proposals still obey the shared budget and do not bypass checker approval', async t => {
+  const { config, root, originals, mcp, base } = await fixture(t, false, actualPaths);
+  let requests = 0;
+  await assert.rejects(syncDocs({ ...config, maxCalls: 1 }, mcp, base, { apply: true, fetchImpl: async () => {
+    requests++;
+    return response({ summary: 'future suggestion', updates: [{ path: 'docs/features.md', edits: [{ old: '# Guide 8', new: '# Guide 8\nClient.city stores the city.' }] }] });
+  } }), error => error.code === 'LLM_BUDGET_EXCEEDED' && error.usage.apiCalls === 1);
+  assert.equal(requests, 1);
+  for (const [path, content] of Object.entries(originals)) assert.equal(await readFile(resolve(root, path), 'utf8'), content);
+});
+
+test('late proposals for already reviewed documents stop before saving earlier approved updates', async t => {
+  const { config, root, originals, mcp, base } = await fixture(t, false, actualPaths);
+  let writers = 0;
+  const simulate = model(tally());
+  await assert.rejects(syncDocs(config, mcp, base, { apply: true, fetchImpl: async (url, init) => {
+    const body = JSON.parse(init.body);
+    if (body.messages[0].content.startsWith('Ты docs_writer') && ++writers === 2) return response({ summary: 'late proposal', updates: [
+      { path: 'README.md', edits: [{ old: '# Guide 0', new: '# Guide 0\nLate change.' }] }
+    ] });
+    return simulate(url, init);
+  } }), /уже проверенной порции/);
+  for (const [path, content] of Object.entries(originals)) assert.equal(await readFile(resolve(root, path), 'utf8'), content);
 });
